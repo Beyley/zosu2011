@@ -102,25 +102,24 @@ fn handleUserLogin(client_sock: network.Socket, server_socket: network.Socket, u
 }
 
 fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socket, users: *UserHashMap, thread_pool: *std.Thread.Pool, allocator: std.mem.Allocator) !void {
-    _ = server_socket;
     //Get the raw writer
     var raw_writer = client_sock.writer();
-    //Get a buffered writer over the raw writermessage: []const u8
+    //Get a buffered writer over the raw writer
     var writer = std.io.bufferedWriter(raw_writer);
-    _ = writer;
 
     var client = allocator.create(Client) catch @panic("OOM");
     // var client = Client{
-    //     .socket = server_socket,
-    //     .writer = writer,
-    //     .username_buf = undefined,
-    //     .username = &.{},
-    //     .password = undefined,
-    //     .display_city = false,
-    //     .time_zone = 0,
-    //     .write_mutex = std.Thread.Mutex{},
-    //     .last_heard_from = std.time.timestamp(),
-    // };
+    client.* = Client{
+        .socket = server_socket,
+        .writer = writer,
+        .username_buf = undefined,
+        .username = &.{},
+        .password = undefined,
+        .display_city = false,
+        .time_zone = 0,
+        .write_mutex = std.Thread.Mutex{},
+        .last_heard_from = std.time.timestamp(),
+    };
 
     var buf: [4096]u8 = undefined;
 
