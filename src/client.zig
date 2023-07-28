@@ -18,8 +18,11 @@ display_city: bool,
 
 //A set of temporary buffers we read into inside the `read` function
 temp_read_buf: [4096]u8 = undefined,
-temp_read_buf_slice: []u8 = undefined,
+temp_read_buf_slice: []u8 = &.{},
 read_from_temp_buf: usize = 0,
+
+///Atomic bool to track whether a packet is already being read or not
+reading: std.atomic.Atomic(bool) = std.atomic.Atomic(bool).init(false),
 
 ///Resets the read buffer, ignoring all data from the previous read
 pub fn reset_read(self: *Self) !void {

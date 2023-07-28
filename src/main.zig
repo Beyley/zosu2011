@@ -45,26 +45,30 @@ fn keepaliveRun(thread_pool: *std.Thread.Pool, clients: *UserHashMap, run: *bool
 
 fn handleClientData(client: *Client, thread_pool: *std.Thread.Pool) void {
     _ = thread_pool;
+    defer client.reading.store(false, .SeqCst);
 
     var buf: [4096]u8 = undefined;
 
-    std.debug.print("thhsat {}\n", .{client.socket.internal});
+    //While there is data to recieve, read the data out
+    while (client.socket.peek(&buf) catch unreachable != 0) {
+        const reader = client.reader();
 
-    //If the client has no data to receive,
-    if (client.socket.peek(&buf) catch unreachable == 0) {
-        //Do nothing
-        return;
+        const packet_id: Packets.ClientPacketType = @enumFromInt(reader.readIntLittle(u16) catch unreachable);
+        const compression = reader.readIntLittle(u8) catch unreachable;
+        _ = compression;
+        const payload_size = reader.readIntLittle(u32) catch unreachable;
+
+        switch (packet_id) {
+            else => {
+                var left_to_read: usize = @intCast(payload_size);
+                while (left_to_read > 0) {
+                    left_to_read -= reader.read(buf[0..@min(payload_size, buf.len)]) catch unreachable;
+                }
+            },
+        }
+
+        std.debug.print("read packet {s}, size {d}\n", .{ @tagName(packet_id), payload_size });
     }
-
-    const reader = client.reader();
-
-    const packet_id: Packets.ClientPacketType = @enumFromInt(reader.readIntLittle(u16) catch unreachable);
-    const compression = reader.readIntLittle(u8) catch unreachable;
-    const payload_size = reader.readIntLittle(u32) catch unreachable;
-
-    _ = reader.read(buf[0..payload_size]) catch unreachable;
-
-    std.debug.print("GOT PACKET {s} {} {d}\n", .{ @tagName(packet_id), compression, payload_size });
 }
 
 fn checkForClientDataPeriodically(thread_pool: *std.Thread.Pool, clients: *UserHashMap, run: *bool) void {
@@ -76,10 +80,16 @@ fn checkForClientDataPeriodically(thread_pool: *std.Thread.Pool, clients: *UserH
             var iter = clients.hash_map.valueIterator();
 
             while (iter.next()) |next| {
-                thread_pool.spawn(handleClientData, .{
-                    next.*,
-                    thread_pool,
-                }) catch @panic("OOM");
+                var client: *Client = next.*;
+                var reading = client.reading.load(.SeqCst);
+
+                if (!reading) {
+                    client.reading.store(true, std.atomic.Ordering.SeqCst);
+                    thread_pool.spawn(handleClientData, .{
+                        client,
+                        thread_pool,
+                    }) catch @panic("OOM");
+                }
             }
         }
 
@@ -102,15 +112,15 @@ fn handleUserLogin(client_sock: network.Socket, server_socket: network.Socket, u
 }
 
 fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socket, users: *UserHashMap, thread_pool: *std.Thread.Pool, allocator: std.mem.Allocator) !void {
+    _ = server_socket;
     //Get the raw writer
     var raw_writer = client_sock.writer();
     //Get a buffered writer over the raw writer
     var writer = std.io.bufferedWriter(raw_writer);
 
-    var client = allocator.create(Client) catch @panic("OOM");
-    // var client = Client{
+    var client = try allocator.create(Client);
     client.* = Client{
-        .socket = server_socket,
+        .socket = client_sock,
         .writer = writer,
         .username_buf = undefined,
         .username = &.{},
@@ -267,7 +277,7 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
     };
 
     try thread_pool.spawn(sendPackets, .{
-        &client,
+        client,
         .{
             protocol_negotiation_packet,
             login_response_packet,
@@ -283,7 +293,7 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
     //Assert the user id doesnt already exist
     std.debug.assert(!users.hash_map.remove(user_id));
     //Put the user into the hash map
-    try users.hash_map.put(user_id, &client);
+    try users.hash_map.put(user_id, client);
     users.mutex.unlock();
 
     //If we error later on, remove the user from the list
