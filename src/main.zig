@@ -4,7 +4,7 @@ const network = @import("network");
 const Client = @import("client.zig");
 const Packets = @import("packet.zig");
 
-pub fn sendPackets(client: *Client, packets: anytype) void {
+pub fn sendPackets(client: *Client, packets: anytype, comptime after: ?fn (client: *Client, args: anytype) void, after_args: anytype) void {
     //Lock the mutex to make sure no other packets are sent during the sending of this one
     client.write_mutex.lock();
     defer client.write_mutex.unlock();
@@ -16,6 +16,9 @@ pub fn sendPackets(client: *Client, packets: anytype) void {
         packet.serialize(client.writer.writer()) catch @panic("UNABLE TO RECOVER FROM WRITE ERROR WAAAA");
     }
     client.writer.flush() catch @panic("UNABLE TO RECOVER FROM FLUSH WAA");
+    if (after) |after_fn| {
+        after_fn(client, after_args);
+    }
 }
 
 fn keepaliveRun(thread_pool: *std.Thread.Pool, clients: *UserHashMap, run: *bool) void {
@@ -30,6 +33,8 @@ fn keepaliveRun(thread_pool: *std.Thread.Pool, clients: *UserHashMap, run: *bool
                 thread_pool.spawn(sendPackets, .{
                     next.*,
                     .{Packets.PingPacket{ .data = .{} }},
+                    null,
+                    .{},
                 }) catch @panic("OOM");
             }
 
@@ -92,7 +97,55 @@ fn handleClientData(client: *Client, users: *UserHashMap, thread_pool: *std.Thre
                     thread_pool.spawn(sendPackets, .{ client, .{
                         updated_client.getPresencePacket(),
                         updated_client.getUserUpdatePacket(),
-                    } }) catch unreachable;
+                    }, null, .{} }) catch unreachable;
+                }
+            },
+            .channel_join => {
+                var channel_name_buf: [Client.MAX_CHANNEL_LENGTH]u8 = undefined;
+                const channel_name = Packets.readBanchoString(reader, &channel_name_buf) catch unreachable;
+
+                std.debug.print("user trying to join channel {s}\n", .{channel_name});
+
+                //TODO: check permissions
+
+                inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
+                    //If the name of the field and the channel name without the # equal,
+                    if (std.mem.eql(u8, field.name, channel_name[1..])) {
+                        thread_pool.spawn(sendPackets, .{ client, .{
+                            Packets.ChannelJoinSuccessPacket{
+                                .data = .{ .channel = "#" ++ field.name },
+                            },
+                        }, null, .{} }) catch unreachable;
+
+                        //Mark that the user is in that channel
+                        @field(client.channels, field.name) = true;
+
+                        //Break out, as we found the channel
+                        break;
+                    }
+                }
+            },
+            .channel_leave => {
+                var channel_name_buf: [Client.MAX_CHANNEL_LENGTH]u8 = undefined;
+                const channel_name = Packets.readBanchoString(reader, &channel_name_buf) catch unreachable;
+
+                std.debug.print("user trying to leave channel {s}\n", .{channel_name});
+
+                inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
+                    //If the name of the field and the channel name without the # equal,
+                    if (std.mem.eql(u8, field.name, channel_name[1..])) {
+                        thread_pool.spawn(sendPackets, .{ client, .{
+                            Packets.ChannelRevokedPacket{
+                                .data = .{ .channel = "#" ++ field.name },
+                            },
+                        }, null, .{} }) catch unreachable;
+
+                        //Mark that the user is no longer in the channel
+                        @field(client.channels, field.name) = false;
+
+                        //Break out, as we found the channel
+                        break;
+                    }
                 }
             },
             else => {
@@ -285,6 +338,8 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
             user_data_packet,
             user_presence_packet,
         },
+        sendAvailableChannels,
+        .{thread_pool},
     });
 
     users.mutex.lock();
@@ -299,6 +354,10 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
         //Assert the user id does exist, it should at this point
         std.debug.assert(users.hash_map.remove(client.user_id));
     }
+}
+
+fn sendAvailableChannels(client: *Client, args: anytype) void {
+    const thread_pool = args[0];
 
     //Iterate over all known channels,
     inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
@@ -313,24 +372,24 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
         //If the user has joined the channel,
         if (@field(client.channels, field.name)) {
             //Send an available packet, then a success packet
-            try thread_pool.spawn(sendPackets, .{ client, .{
-                available_packet,
-                Packets.ChannelJoinSuccessPacket{
-                    .data = .{
-                        .channel = channel_name,
+            thread_pool.spawn(sendPackets, .{
+                client,
+                .{
+                    available_packet,
+                    Packets.ChannelJoinSuccessPacket{
+                        .data = .{
+                            .channel = channel_name,
+                        },
                     },
                 },
-            } });
+                null,
+                .{},
+            }) catch unreachable;
         } else {
             //Send only an available packet
-            try thread_pool.spawn(sendPackets, .{ client, .{available_packet} });
+            thread_pool.spawn(sendPackets, .{ client, .{available_packet}, null, .{} }) catch unreachable;
         }
     }
-
-    // const reader = client.reader();
-
-    // while (true) {
-    // }
 }
 
 pub fn main() !void {

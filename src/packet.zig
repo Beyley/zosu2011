@@ -1,6 +1,8 @@
 const std = @import("std");
 const network = @import("network");
 
+const Client = @import("client.zig");
+
 pub const WriterType = std.io.BufferedWriter(4096, network.Socket.Writer).Writer;
 
 //Special bancho types
@@ -9,7 +11,63 @@ pub const BanchoUShort = u16;
 pub const BanchoInt = i32;
 pub const BanchoLong = i64;
 
-fn writeUleb128(writer: WriterType, int: anytype) !void {
+pub fn readBanchoString(reader: Client.Reader, buf: []u8) ![]u8 {
+    const data_type = try reader.readByte();
+
+    if (data_type == 0) {
+        return "";
+    } else if (data_type == 11) {
+        //Read the length of the string
+        const length = try readUleb128(reader, usize);
+
+        //If the string is too long to fit in the buffer, return an error
+        if (length > buf.len) {
+            return error.StringTooBig;
+        }
+
+        //Reture the chunk of the buffer that was read
+        return buf[0..try reader.readAll(buf[0..length])];
+    } else {
+        return error.UnknownDataType;
+    }
+
+    unreachable;
+}
+
+///Reads a Uleb128 number from the stream
+pub fn readUleb128(reader: Client.Reader, comptime T: type) !T {
+    var num: T = 0;
+
+    const mask: u8 = 128;
+
+    var b: u8 = try reader.readByte();
+    num |= b & ~mask;
+    //While the 8th bit is not 0,
+    while (b & mask != 0) {
+        //Try to shift the number to the left 7 bits to make room for the
+        const shift = @shlWithOverflow(num, 7);
+
+        //If the number overflowed from the shift, throw an error
+        if (shift[1] == 1) {
+            return error.NumberFromStreamTooBig;
+        }
+
+        //If it was not an overflow, set the num to the shifted value
+        num = shift[0];
+
+        //Copy in the bits from the stream, disposing of the 8th bit
+        num |= b & ~mask;
+
+        //If the 8th bit is 0, dont read more!
+        if (b & mask != 0) {
+            b = try reader.readByte();
+        }
+    }
+
+    return num;
+}
+
+pub fn writeUleb128(writer: WriterType, int: anytype) !void {
     if (int == 0) {
         try writer.writeIntLittle(u8, 0);
         return;
@@ -29,7 +87,7 @@ fn writeUleb128(writer: WriterType, int: anytype) !void {
     }
 }
 
-fn uleb128Size(int: anytype) u32 {
+pub fn uleb128Size(int: anytype) u32 {
     if (int == 0) {
         return @sizeOf(u8);
     }
@@ -47,7 +105,7 @@ fn uleb128Size(int: anytype) u32 {
     return @intCast(length * @sizeOf(u8));
 }
 
-fn writeBanchoString(writer: WriterType, str: []const u8) !void {
+pub fn writeBanchoString(writer: WriterType, str: []const u8) !void {
     //If the length is 0
     if (str.len == 0) {
         //Write it as a "null object"
@@ -62,7 +120,7 @@ fn writeBanchoString(writer: WriterType, str: []const u8) !void {
     }
 }
 
-fn banchoStringSize(str: []const u8) u32 {
+pub fn banchoStringSize(str: []const u8) u32 {
     if (str.len == 0) return @sizeOf(BanchoByte);
 
     return @intCast(@sizeOf(BanchoByte) + uleb128Size(str.len) + str.len);
@@ -341,6 +399,20 @@ pub const PingPacket = Packet(ServerPacketType.ping, struct {
     pub fn serialize(self: Self, writer: WriterType) !void {
         _ = writer;
         _ = self;
+    }
+});
+
+pub const ChannelRevokedPacket = Packet(ServerPacketType.channel_revoked, struct {
+    const Self = @This();
+
+    channel: []const u8,
+
+    pub fn size(self: Self) u32 {
+        return banchoStringSize(self.channel);
+    }
+
+    pub fn serialize(self: Self, writer: WriterType) !void {
+        try writeBanchoString(writer, self.channel);
     }
 });
 

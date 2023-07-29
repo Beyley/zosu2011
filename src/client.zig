@@ -33,6 +33,20 @@ bytes_read: usize = 0,
 ///The channels the user is currently in
 channels: AvailableChannels = .{},
 
+fn maxChannelLength() comptime_int {
+    var max_channel_length = MAX_USERNAME_LENGTH;
+
+    inline for (@typeInfo(AvailableChannels).Struct.fields) |field| {
+        if (field.name.len > max_channel_length) {
+            max_channel_length = field.name.len;
+        }
+    }
+
+    return max_channel_length;
+}
+
+pub const MAX_CHANNEL_LENGTH = maxChannelLength();
+
 ///A struct containing all the available channels
 pub const AvailableChannels = struct {
     osu: bool = true,
