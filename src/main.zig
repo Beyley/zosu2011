@@ -287,42 +287,43 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
 
     var buf: [4096]u8 = undefined;
 
-    var read: usize = undefined;
+    var reader = client.reader();
 
-    read = try client_sock.receive(&buf);
+    var read: []u8 = undefined;
+    read = try reader.readUntilDelimiter(&buf, '\n');
     //If its less than 2 chars long, this is invalid
-    if (read < 2) return;
-    //Remove the ending \r\n
-    read -= 2;
+    if (read.len < 1) return error.ReadTooShort;
+    //Remove the ending \r
+    read.len -= 1;
 
     //If the username length is too long, return out
     //TODO: return real error here to the client
-    if (read > Client.MAX_USERNAME_LENGTH) return;
+    if (read.len > Client.MAX_USERNAME_LENGTH) return error.UsernameTooLong;
 
     //Copy in the client username
-    @memcpy(client.username_buf[0..read], buf[0..read]);
+    @memcpy(client.username_buf[0..read.len], read);
     //Set the client username slice to the right size
-    client.username = client.username_buf[0..read];
+    client.username = client.username_buf[0..read.len];
 
-    read = try client_sock.receive(&buf);
+    read = try reader.readUntilDelimiter(&buf, '\n');
 
     //If its less than 2 chars long, this is invalid
-    if (read < 2) return;
+    if (read.len < 1) return error.ReadTooShort;
     //Remove the ending \r\n
-    read -= 2;
+    read.len -= 1;
 
     //Parse the password into an array of bytes
-    client.password = @bitCast(try std.fmt.parseInt(u128, buf[0..read], 16));
+    client.password = @bitCast(try std.fmt.parseInt(u128, read, 16));
 
-    read = try client_sock.receive(&buf);
+    read = try reader.readUntilDelimiter(&buf, '\n');
 
     //If its less than 2 chars long, this is invalid
-    if (read < 2) return;
+    if (read.len < 1) return error.ReadTooShort;
     //Remove the ending \r\n
-    read -= 2;
+    read.len -= 1;
 
     //Split up the info line
-    var info_iter = std.mem.split(u8, buf[0..read], "|");
+    var info_iter = std.mem.split(u8, read, "|");
 
     //Version is just a string
     const version = info_iter.next() orelse @panic("MISSING VERSIOn");
@@ -493,10 +494,13 @@ pub fn main() !void {
     std.debug.print("Started server on port {d}\n", .{port});
 
     while (true) {
-        var buf: [4096]u8 = undefined;
-        _ = buf;
-
         var client_socket = try server_socket.accept();
+
+        //Timeout in seconds
+        const timeout = 10;
+
+        try client_socket.setReadTimeout(timeout * std.time.us_per_s);
+        try client_socket.setWriteTimeout(timeout * std.time.us_per_s);
 
         //Make one of the threads in the thread pool handle the user logon
         try thread_pool.spawn(handleUserLogin, .{ client_socket, server_socket, &users, &thread_pool, allocator });
