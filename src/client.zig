@@ -30,6 +30,17 @@ read_from_temp_buf: usize = 0,
 reading: std.atomic.Atomic(bool) = std.atomic.Atomic(bool).init(false),
 bytes_read: usize = 0,
 
+///The channels the user is currently in
+channels: AvailableChannels = .{},
+
+///A struct containing all the available channels
+pub const AvailableChannels = struct {
+    osu: bool = true,
+    taiko: bool = false,
+    ctb: bool = false,
+    ziglang: bool = false,
+};
+
 ///Resets the read buffer, ignoring all data from the previous read
 pub fn reset_read(self: *Self) !void {
     self.temp_read_buf_slice = self.temp_read_buf[0..self.socket.receive(&self.temp_read_buf)];

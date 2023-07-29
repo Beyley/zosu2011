@@ -270,43 +270,6 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
         },
     };
 
-    //After the client knows their permissions, let them know about the #osu channel
-    var channel_available_packet = Packets.ChannelAvailablePacket{
-        .data = .{
-            .channel = "#osu",
-        },
-    };
-
-    //Force the user to join the #osu channel, the client uses this to determine when the login handshake is complete, for some reason
-    var channel_join_success_packet = Packets.ChannelJoinSuccessPacket{
-        .data = .{
-            .channel = "#osu",
-        },
-    };
-
-    //Send the user their user stats
-    // var user_data_packet = Packets.UserUpdatePacket{
-    //     .data = .{
-    //         .user_stats = Packets.UserStats{
-    //             .accuracy = 1,
-    //             .level = 0,
-    //             .play_count = 1,
-    //             .rank = 69,
-    //             .ranked_score = 96,
-    //             .status = Packets.StatusUpdate{
-    //                 .beatmap_checksum = std.mem.zeroes([std.crypto.hash.Md5.digest_length * 2]u8),
-    //                 .beatmap_id = 1,
-    //                 .current_mods = .{},
-    //                 .play_mode = .osu,
-    //                 .status = Packets.UserStatus.idle,
-    //                 .status_text = "",
-    //                 .status_text_buf = undefined,
-    //             },
-    //             .total_score = 420,
-    //             .user_id = client.user_id,
-    //         },
-    //     },
-    // };
     var user_data_packet = client.getUserUpdatePacket();
 
     //Send the user a presence packet, giving all the nessesary info about themselves,
@@ -319,8 +282,6 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
             protocol_negotiation_packet,
             login_response_packet,
             login_permissions_packet,
-            channel_available_packet,
-            channel_join_success_packet,
             user_data_packet,
             user_presence_packet,
         },
@@ -331,14 +292,39 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
     std.debug.assert(!users.hash_map.remove(client.user_id));
     //Put the user into the hash map
     try users.hash_map.put(client.user_id, client);
-    users.mutex.unlock();
+    defer users.mutex.unlock();
 
     //If we error later on, remove the user from the list
     errdefer {
-        users.mutex.lock();
         //Assert the user id does exist, it should at this point
         std.debug.assert(users.hash_map.remove(client.user_id));
-        users.mutex.unlock();
+    }
+
+    //Iterate over all known channels,
+    inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
+        const channel_name = "#" ++ field.name;
+
+        const available_packet = Packets.ChannelAvailablePacket{
+            .data = .{
+                .channel = channel_name,
+            },
+        };
+
+        //If the user has joined the channel,
+        if (@field(client.channels, field.name)) {
+            //Send an available packet, then a success packet
+            try thread_pool.spawn(sendPackets, .{ client, .{
+                available_packet,
+                Packets.ChannelJoinSuccessPacket{
+                    .data = .{
+                        .channel = channel_name,
+                    },
+                },
+            } });
+        } else {
+            //Send only an available packet
+            try thread_pool.spawn(sendPackets, .{ client, .{available_packet} });
+        }
     }
 
     // const reader = client.reader();
