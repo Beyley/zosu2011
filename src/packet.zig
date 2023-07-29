@@ -416,6 +416,47 @@ pub const ChannelRevokedPacket = Packet(ServerPacketType.channel_revoked, struct
     }
 });
 
+pub const MAX_MESSAGE_SIZE = 256;
+
+pub const SendMessagePacket = Packet(ServerPacketType.send_message, struct {
+    const Self = @This();
+
+    ///The sender of the message
+    ///NOTE: The memory set here *must* stay alive until packet sending
+    sender: []const u8,
+    ///The target of the message
+    ///NOTE: The memory set here *must* stay alive until packet sending
+    target: []const u8,
+
+    message_buf: [MAX_MESSAGE_SIZE]u8 = undefined,
+    message_length: usize,
+
+    pub fn size(self: Self) u32 {
+        return banchoStringSize(self.sender) + banchoStringSize(self.target) + banchoStringSize(self.message_buf[0..self.message_length]);
+    }
+
+    pub fn serialize(self: Self, writer: WriterType) !void {
+        try writeBanchoString(writer, self.sender);
+        try writeBanchoString(writer, self.message_buf[0..self.message_length]);
+        try writeBanchoString(writer, self.target);
+    }
+});
+
+///Creates a send message packet
+///NOTE: only `message` will be copied, all other fields *must* stay alive until the packet is sent
+pub fn createSendMessagePacket(sender: []const u8, target: []const u8, message: []const u8) SendMessagePacket {
+    var packet = SendMessagePacket{
+        .data = .{
+            .sender = sender,
+            .target = target,
+            .message_length = message.len,
+        },
+    };
+    @memcpy(packet.data.message_buf[0..message.len], message);
+
+    return packet;
+}
+
 pub fn Packet(comptime packet_id: anytype, comptime DataType: type) type {
     if (@sizeOf(@TypeOf(packet_id)) != @sizeOf(u16)) {
         @compileError("Invalid packet id type! Type must be of size u16");

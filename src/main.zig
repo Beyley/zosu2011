@@ -148,6 +148,56 @@ fn handleClientData(client: *Client, users: *UserHashMap, thread_pool: *std.Thre
                     }
                 }
             },
+            .send_irc_message => {
+                var buf2: [0]u8 = undefined;
+                //When the client sends send_irc_message, the `sender` field is never populated
+                _ = Packets.readBanchoString(reader, &buf2) catch unreachable;
+                var target_buf: [Client.MAX_CHANNEL_LENGTH]u8 = undefined;
+                const message = Packets.readBanchoString(reader, &buf) catch unreachable;
+                const target = Packets.readBanchoString(reader, &target_buf) catch unreachable;
+
+                //Assert the user doesnt try to send too long of a message
+                //TODO: cleanly handle this error case
+                std.debug.assert(message.len <= Packets.MAX_MESSAGE_SIZE);
+
+                std.debug.print("message {s} to target {s}\n", .{ message, target });
+
+                inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
+                    if (std.mem.eql(u8, field.name, target[1..])) {
+                        const create_message_packet = Packets.createSendMessagePacket(
+                            client.username,
+                            "#" ++ field.name,
+                            message,
+                        );
+
+                        users.mutex.lock();
+                        defer users.mutex.unlock();
+
+                        var iter = users.hash_map.valueIterator();
+
+                        //Iterate over every logged in player
+                        while (iter.next()) |next| {
+                            var target_client: *Client = next.*;
+
+                            //Dont send the message to the message sender
+                            if (target_client == client) {
+                                continue;
+                            }
+
+                            //If the user is not in the channel
+                            if (!@field(target_client.channels, field.name)) {
+                                //Skip this user
+                                continue;
+                            }
+
+                            //If the are in the channel, send them the packet
+                            thread_pool.spawn(sendPackets, .{ target_client, .{create_message_packet}, null, .{} }) catch unreachable;
+                        }
+
+                        break;
+                    }
+                }
+            },
             else => {
                 var left_to_read: usize = @intCast(payload_size);
                 while (left_to_read > 0) {
