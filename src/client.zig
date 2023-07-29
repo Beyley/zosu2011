@@ -1,10 +1,13 @@
 const std = @import("std");
 const network = @import("network");
 
+const Packets = @import("packet.zig");
+
 const Self = @This();
 
 pub const MAX_USERNAME_LENGTH = 32;
 
+user_id: Packets.BanchoInt,
 username_buf: [MAX_USERNAME_LENGTH]u8,
 username: []u8,
 password: [std.crypto.hash.Md5.digest_length]u8,
@@ -16,6 +19,8 @@ last_heard_from: i64,
 time_zone: i8,
 display_city: bool,
 
+status: Packets.StatusUpdate,
+
 //A set of temporary buffers we read into inside the `read` function
 temp_read_buf: [4096]u8 = undefined,
 temp_read_buf_slice: []u8 = &.{},
@@ -23,6 +28,7 @@ read_from_temp_buf: usize = 0,
 
 ///Atomic bool to track whether a packet is already being read or not
 reading: std.atomic.Atomic(bool) = std.atomic.Atomic(bool).init(false),
+bytes_read: usize = 0,
 
 ///Resets the read buffer, ignoring all data from the previous read
 pub fn reset_read(self: *Self) !void {
@@ -31,7 +37,49 @@ pub fn reset_read(self: *Self) !void {
 
 pub const Reader = std.io.Reader(*Self, network.Socket.Reader.Error, read);
 
+pub fn getPresencePacket(self: Self) Packets.UserPresencePacket {
+    return Packets.UserPresencePacket{
+        .data = .{
+            .user_presence = Packets.UserPresence{
+                .username = self.username,
+                .user_id = self.user_id,
+                .timezone = self.time_zone,
+                .rank = 1, //TODO
+                .permissions = Packets.LoginPermissions{
+                    .normal = true,
+                    .supporter = true,
+                    .bat = false,
+                    .friend = false,
+                }, //TODO
+                .longitude = 0, //TODO
+                .latitude = 0, //TODO
+                .country = 0, //TODO
+                .city = "", //TODO
+                .avatar_extension = .none,
+            },
+        },
+    };
+}
+
+pub fn getUserUpdatePacket(self: Self) Packets.UserUpdatePacket {
+    return Packets.UserUpdatePacket{
+        .data = .{
+            .user_stats = Packets.UserStats{
+                .user_id = self.user_id,
+                .total_score = 0, //TODO
+                .status = self.status,
+                .ranked_score = 0, //TODO
+                .rank = 1, //TODO
+                .play_count = 0, //TODO
+                .level = 0, //TODO
+                .accuracy = 1, //TODO
+            },
+        },
+    };
+}
+
 pub fn reader(self: *Self) Reader {
+    self.bytes_read = 0;
     return Reader{
         .context = self,
     };
@@ -73,6 +121,8 @@ pub fn read(self: *Self, buf: []u8) !usize {
         //Reset the amount we have read from the temp buf
         self.read_from_temp_buf = 0;
     }
+
+    self.bytes_read += buf.len;
 
     return buf.len;
 }

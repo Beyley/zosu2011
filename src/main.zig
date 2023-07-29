@@ -43,14 +43,13 @@ fn keepaliveRun(thread_pool: *std.Thread.Pool, clients: *UserHashMap, run: *bool
     }
 }
 
-fn handleClientData(client: *Client, thread_pool: *std.Thread.Pool) void {
-    _ = thread_pool;
+fn handleClientData(client: *Client, users: *UserHashMap, thread_pool: *std.Thread.Pool) void {
     defer client.reading.store(false, .SeqCst);
 
     var buf: [4096]u8 = undefined;
 
-    //While there is data to recieve, read the data out
-    while (client.socket.peek(&buf) catch unreachable != 0) {
+    //While there is data to recieve, or there are bytes left in our buffer
+    while (client.socket.peek(&buf) catch unreachable != 0 or client.read_from_temp_buf < client.temp_read_buf_slice.len) {
         const reader = client.reader();
 
         const packet_id: Packets.ClientPacketType = @enumFromInt(reader.readIntLittle(u16) catch unreachable);
@@ -58,7 +57,44 @@ fn handleClientData(client: *Client, thread_pool: *std.Thread.Pool) void {
         _ = compression;
         const payload_size = reader.readIntLittle(u32) catch unreachable;
 
+        const before_bytes_read = client.bytes_read;
+
         switch (packet_id) {
+            .exit => {
+                const update_available = reader.readIntLittle(Packets.BanchoInt) catch unreachable;
+                _ = update_available;
+
+                std.debug.print("user {s} exiting...\n", .{client.username});
+
+                //TODO: handle user exits
+            },
+            .receive_updates => {
+                const UpdateMode = enum(Packets.BanchoInt) {
+                    none = 0,
+                    all = 1,
+                    friends = 2,
+                };
+
+                const update_mode: UpdateMode = @enumFromInt(reader.readIntLittle(Packets.BanchoInt) catch unreachable);
+
+                std.debug.print("receive_updates with mode {s}\n", .{@tagName(update_mode)});
+
+                users.mutex.lock();
+                defer users.mutex.unlock();
+
+                var iter = users.hash_map.valueIterator();
+
+                while (iter.next()) |next| {
+                    const updated_client: *Client = next.*;
+
+                    //TODO: filter by friends if update_mode == .friends
+
+                    thread_pool.spawn(sendPackets, .{ client, .{
+                        updated_client.getPresencePacket(),
+                        updated_client.getUserUpdatePacket(),
+                    } }) catch unreachable;
+                }
+            },
             else => {
                 var left_to_read: usize = @intCast(payload_size);
                 while (left_to_read > 0) {
@@ -68,6 +104,9 @@ fn handleClientData(client: *Client, thread_pool: *std.Thread.Pool) void {
         }
 
         std.debug.print("read packet {s}, size {d}\n", .{ @tagName(packet_id), payload_size });
+
+        //Safety check, since we buffer packets so aggressively, we need to be sure we have read all the bytes in the payload
+        std.debug.assert(client.bytes_read - before_bytes_read == payload_size);
     }
 }
 
@@ -87,6 +126,7 @@ fn checkForClientDataPeriodically(thread_pool: *std.Thread.Pool, clients: *UserH
                     client.reading.store(true, std.atomic.Ordering.SeqCst);
                     thread_pool.spawn(handleClientData, .{
                         client,
+                        clients,
                         thread_pool,
                     }) catch @panic("OOM");
                 }
@@ -129,7 +169,18 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
         .time_zone = 0,
         .write_mutex = std.Thread.Mutex{},
         .last_heard_from = std.time.timestamp(),
+        .user_id = undefined,
+        .status = Packets.StatusUpdate{
+            .beatmap_checksum = undefined,
+            .beatmap_id = 0,
+            .current_mods = .{},
+            .play_mode = .osu,
+            .status = .idle,
+            .status_text = "",
+            .status_text_buf = undefined,
+        },
     };
+    @memset(&client.status.beatmap_checksum, 0);
 
     var buf: [4096]u8 = undefined;
 
@@ -190,7 +241,7 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
     //TODO: password check here!
 
     //Return the user id (TODO: return unique IDs for each user)
-    const user_id = 0;
+    client.user_id = 1;
 
     //The permissions the user has (TODO: ping some kind of database to get this information)
     const permissions = Packets.LoginPermissions{
@@ -208,7 +259,7 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
     //After the client has been told about the protocol version, send a login reply
     var login_response_packet = Packets.LoginReplyPacket{
         .data = .{
-            .login_response = .{ .user_id = user_id },
+            .login_response = .{ .user_id = client.user_id },
         },
     };
 
@@ -234,47 +285,33 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
     };
 
     //Send the user their user stats
-    var user_data_packet = Packets.UserUpdatePacket{
-        .data = .{
-            .user_stats = Packets.UserStats{
-                .accuracy = 1,
-                .level = 0,
-                .play_count = 1,
-                .rank = 69,
-                .ranked_score = 96,
-                .status = Packets.StatusUpdate{
-                    .beatmap_checksum = std.mem.zeroes([std.crypto.hash.Md5.digest_length * 2]u8),
-                    .beatmap_id = 1,
-                    .current_mods = .{},
-                    .play_mode = .osu,
-                    .status = Packets.UserStatus.idle,
-                    .status_text = "",
-                    .status_text_buf = undefined,
-                },
-                .total_score = 420,
-                .user_id = user_id,
-            },
-        },
-    };
+    // var user_data_packet = Packets.UserUpdatePacket{
+    //     .data = .{
+    //         .user_stats = Packets.UserStats{
+    //             .accuracy = 1,
+    //             .level = 0,
+    //             .play_count = 1,
+    //             .rank = 69,
+    //             .ranked_score = 96,
+    //             .status = Packets.StatusUpdate{
+    //                 .beatmap_checksum = std.mem.zeroes([std.crypto.hash.Md5.digest_length * 2]u8),
+    //                 .beatmap_id = 1,
+    //                 .current_mods = .{},
+    //                 .play_mode = .osu,
+    //                 .status = Packets.UserStatus.idle,
+    //                 .status_text = "",
+    //                 .status_text_buf = undefined,
+    //             },
+    //             .total_score = 420,
+    //             .user_id = client.user_id,
+    //         },
+    //     },
+    // };
+    var user_data_packet = client.getUserUpdatePacket();
 
     //Send the user a presence packet, giving all the nessesary info about themselves,
     //With this the client is happy to report that it is no longer "recieving data"
-    var user_presence_packet = Packets.UserPresencePacket{
-        .data = .{
-            .user_presence = Packets.UserPresence{
-                .avatar_extension = .png,
-                .city = "city eamoa",
-                .country = 1,
-                .longitude = 2,
-                .latitude = 3,
-                .permissions = permissions,
-                .rank = 69,
-                .timezone = client.time_zone,
-                .user_id = user_id,
-                .username = client.username,
-            },
-        },
-    };
+    var user_presence_packet = client.getPresencePacket();
 
     try thread_pool.spawn(sendPackets, .{
         client,
@@ -291,16 +328,16 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
 
     users.mutex.lock();
     //Assert the user id doesnt already exist
-    std.debug.assert(!users.hash_map.remove(user_id));
+    std.debug.assert(!users.hash_map.remove(client.user_id));
     //Put the user into the hash map
-    try users.hash_map.put(user_id, client);
+    try users.hash_map.put(client.user_id, client);
     users.mutex.unlock();
 
     //If we error later on, remove the user from the list
     errdefer {
         users.mutex.lock();
         //Assert the user id does exist, it should at this point
-        std.debug.assert(users.hash_map.remove(user_id));
+        std.debug.assert(users.hash_map.remove(client.user_id));
         users.mutex.unlock();
     }
 

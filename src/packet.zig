@@ -277,7 +277,7 @@ pub const ChannelJoinSuccessPacket = Packet(ServerPacketType.channel_join_succes
     }
 });
 
-const AvatarExtension = enum(BanchoByte) {
+pub const AvatarExtension = enum(BanchoByte) {
     none = 0,
     png = 1,
     jpeg = 2,
