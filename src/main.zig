@@ -326,6 +326,9 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
     client_rc.deinit_fn = handleClientDisconnect;
     var client = client_rc.data;
 
+    //If something bad has happened, just drop the client
+    errdefer client_rc.drop();
+
     @memset(&client.status.beatmap_checksum, 0);
 
     var buf: [4096]u8 = undefined;
