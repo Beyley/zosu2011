@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.addModule("network", b.dependency("network", .{}).module("network"));
+    exe.addModule("memutils", b.dependency("memutils", .{}).module("memutils"));
 
     b.installArtifact(exe);
 

@@ -6,5 +6,9 @@
             .url = "https://github.com/MasterQ32/zig-network/archive/7b5f76ea09626b96755c027bf4bd5b7e45297027.tar.gz",
             .hash = "122090e7cb4459c2224399a45c56f47462733b919aa547c96b8c14ee705bfa22976e",
         },
+        .memutils = .{
+            .url = "https://github.com/Beyley/zig-memutils/archive/66a4a25f5ef90f0b22303c420d1ce17073490704.tar.gz",
+            .hash = "12207ccdedb26832e0a207fa013814df96d6e5be614be77cdff5c0cef5c33b62647c",
+        },
     },
 }

@@ -457,6 +457,22 @@ pub fn createSendMessagePacket(sender: []const u8, target: []const u8, message: 
     return packet;
 }
 
+pub const HandleOsuQuitPacket = Packet(ServerPacketType.handle_osu_quit, struct {
+    const Self = @This();
+
+    user_id: BanchoInt,
+
+    pub fn size(self: Self) u32 {
+        _ = self;
+
+        return @sizeOf(BanchoInt);
+    }
+
+    pub fn serialize(self: Self, writer: WriterType) !void {
+        try writer.writeIntLittle(BanchoInt, self.user_id);
+    }
+});
+
 pub fn Packet(comptime packet_id: anytype, comptime DataType: type) type {
     if (@sizeOf(@TypeOf(packet_id)) != @sizeOf(u16)) {
         @compileError("Invalid packet id type! Type must be of size u16");

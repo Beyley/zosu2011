@@ -1,10 +1,17 @@
 const std = @import("std");
 const network = @import("network");
+const memutils = @import("memutils");
 
 const Client = @import("client.zig");
 const Packets = @import("packet.zig");
 
-pub fn sendPackets(client: *Client, packets: anytype, comptime after: ?fn (client: *Client, args: anytype) void, after_args: anytype) void {
+const RcClient = memutils.Rc(Client);
+
+pub fn sendPackets(client_rc: RcClient, packets: anytype, comptime after: ?fn (client: RcClient, args: anytype) void, after_args: anytype) void {
+    defer client_rc.drop();
+
+    var client: *Client = client_rc.data;
+
     //Lock the mutex to make sure no other packets are sent during the sending of this one
     client.write_mutex.lock();
     defer client.write_mutex.unlock();
@@ -17,7 +24,7 @@ pub fn sendPackets(client: *Client, packets: anytype, comptime after: ?fn (clien
     }
     client.writer.flush() catch @panic("UNABLE TO RECOVER FROM FLUSH WAA");
     if (after) |after_fn| {
-        after_fn(client, after_args);
+        after_fn(client_rc.borrow(), after_args);
     }
 }
 
@@ -31,7 +38,7 @@ fn keepaliveRun(thread_pool: *std.Thread.Pool, clients: *UserHashMap, run: *bool
 
             while (iter.next()) |next| {
                 thread_pool.spawn(sendPackets, .{
-                    next.*,
+                    next.*.borrow(),
                     .{Packets.PingPacket{ .data = .{} }},
                     null,
                     .{},
@@ -48,7 +55,10 @@ fn keepaliveRun(thread_pool: *std.Thread.Pool, clients: *UserHashMap, run: *bool
     }
 }
 
-fn handleClientData(client: *Client, users: *UserHashMap, thread_pool: *std.Thread.Pool) void {
+fn handleClientData(client_rc: RcClient, users: *UserHashMap, thread_pool: *std.Thread.Pool) void {
+    defer client_rc.drop();
+
+    var client: *Client = client_rc.data;
     defer client.reading.store(false, .SeqCst);
 
     var buf: [4096]u8 = undefined;
@@ -72,6 +82,8 @@ fn handleClientData(client: *Client, users: *UserHashMap, thread_pool: *std.Thre
                 std.debug.print("user {s} exiting...\n", .{client.username});
 
                 //TODO: handle user exits
+                //client_rc.drop();
+                return;
             },
             .receive_updates => {
                 const UpdateMode = enum(Packets.BanchoInt) {
@@ -90,11 +102,11 @@ fn handleClientData(client: *Client, users: *UserHashMap, thread_pool: *std.Thre
                 var iter = users.hash_map.valueIterator();
 
                 while (iter.next()) |next| {
-                    const updated_client: *Client = next.*;
+                    const updated_client: *Client = next.*.get();
 
                     //TODO: filter by friends if update_mode == .friends
 
-                    thread_pool.spawn(sendPackets, .{ client, .{
+                    thread_pool.spawn(sendPackets, .{ client_rc.borrow(), .{
                         updated_client.getPresencePacket(),
                         updated_client.getUserUpdatePacket(),
                     }, null, .{} }) catch unreachable;
@@ -111,7 +123,7 @@ fn handleClientData(client: *Client, users: *UserHashMap, thread_pool: *std.Thre
                 inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
                     //If the name of the field and the channel name without the # equal,
                     if (std.mem.eql(u8, field.name, channel_name[1..])) {
-                        thread_pool.spawn(sendPackets, .{ client, .{
+                        thread_pool.spawn(sendPackets, .{ client_rc.borrow(), .{
                             Packets.ChannelJoinSuccessPacket{
                                 .data = .{ .channel = "#" ++ field.name },
                             },
@@ -134,7 +146,7 @@ fn handleClientData(client: *Client, users: *UserHashMap, thread_pool: *std.Thre
                 inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
                     //If the name of the field and the channel name without the # equal,
                     if (std.mem.eql(u8, field.name, channel_name[1..])) {
-                        thread_pool.spawn(sendPackets, .{ client, .{
+                        thread_pool.spawn(sendPackets, .{ client_rc.borrow(), .{
                             Packets.ChannelRevokedPacket{
                                 .data = .{ .channel = "#" ++ field.name },
                             },
@@ -177,21 +189,21 @@ fn handleClientData(client: *Client, users: *UserHashMap, thread_pool: *std.Thre
 
                         //Iterate over every logged in player
                         while (iter.next()) |next| {
-                            var target_client: *Client = next.*;
+                            var target_client: RcClient = next.*;
 
                             //Dont send the message to the message sender
-                            if (target_client == client) {
+                            if (target_client.get().user_id == client.user_id) {
                                 continue;
                             }
 
                             //If the user is not in the channel
-                            if (!@field(target_client.channels, field.name)) {
+                            if (!@field(target_client.get().channels, field.name)) {
                                 //Skip this user
                                 continue;
                             }
 
                             //If the are in the channel, send them the packet
-                            thread_pool.spawn(sendPackets, .{ target_client, .{create_message_packet}, null, .{} }) catch unreachable;
+                            thread_pool.spawn(sendPackets, .{ target_client.borrow(), .{create_message_packet}, null, .{} }) catch unreachable;
                         }
 
                         break;
@@ -213,23 +225,62 @@ fn handleClientData(client: *Client, users: *UserHashMap, thread_pool: *std.Thre
     }
 }
 
-fn checkForClientDataPeriodically(thread_pool: *std.Thread.Pool, clients: *UserHashMap, run: *bool) void {
+// fn disconnectUser(client: RcClient, users: *UserHashMap, thread_pool: *std.Thread.Pool) !void {
+//     client.drop();
+//     //FIXME: THIS IS DUMB, PLEASE FIX THIS AT SOME POINT KTHXBYE
+//     while (client.reading.load(.SeqCst)) {
+//         // try std.Thread.yield();
+//         continue;
+//     }
+//     client.reading.store(true, .SeqCst);
+
+//     //Lock the user hash map mutex
+//     users.mutex.lock();
+//     users.mutex.unlock();
+
+//     client.socket.close();
+
+//     const user_id = client.user_id;
+
+//     //Remove the user from the list
+//     std.debug.assert(users.hash_map.remove(user_id));
+
+//     //Grab the allocator out of the client
+//     const allocator = client.allocator;
+
+//     //Set the client's contents to undefined
+//     client.* = undefined;
+//     //Destroy the client object
+//     allocator.destroy(client);
+
+//     var iter = users.hash_map.valueIterator();
+//     while (iter.next()) |next| {
+//         const client_to_notify: RcClient = next.*;
+
+//         try thread_pool.spawn(sendPackets, .{ client_to_notify.borrow(), .{Packets.HandleOsuQuitPacket{
+//             .data = .{ .user_id = user_id },
+//         }}, null, .{} });
+//     }
+// }
+
+fn checkForClientDataPeriodically(thread_pool: *std.Thread.Pool, users: *UserHashMap, run: *bool) void {
     while (run.*) {
         {
-            clients.mutex.lock();
-            defer clients.mutex.unlock();
+            users.mutex.lock();
+            defer users.mutex.unlock();
 
-            var iter = clients.hash_map.valueIterator();
+            var iter = users.hash_map.valueIterator();
 
             while (iter.next()) |next| {
-                var client: *Client = next.*;
+                var client_rc: RcClient = next.*;
+                var client = client_rc.data;
                 var reading = client.reading.load(.SeqCst);
 
                 if (!reading) {
                     client.reading.store(true, std.atomic.Ordering.SeqCst);
                     thread_pool.spawn(handleClientData, .{
-                        client,
-                        clients,
+                        client_rc.borrow(),
+                        users,
                         thread_pool,
                     }) catch @panic("OOM");
                 }
@@ -242,7 +293,7 @@ fn checkForClientDataPeriodically(thread_pool: *std.Thread.Pool, clients: *UserH
 }
 
 const UserHashMap = struct {
-    pub const HashMap = std.AutoHashMap(Packets.BanchoInt, *Client);
+    pub const HashMap = std.AutoHashMap(Packets.BanchoInt, RcClient);
 
     hash_map: HashMap,
     mutex: std.Thread.Mutex,
@@ -251,7 +302,7 @@ const UserHashMap = struct {
 fn handleUserLogin(client_sock: network.Socket, server_socket: network.Socket, users: *UserHashMap, thread_pool: *std.Thread.Pool, allocator: std.mem.Allocator) void {
     std.debug.print("Client connected from {}\n", .{client_sock.getRemoteEndPoint() catch @panic("shit")});
 
-    handleUserHandshake(client_sock, server_socket, users, thread_pool, allocator) catch @panic("user login fail");
+    handleUserHandshake(client_sock, server_socket, users, thread_pool, allocator) catch unreachable;
 }
 
 fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socket, users: *UserHashMap, thread_pool: *std.Thread.Pool, allocator: std.mem.Allocator) !void {
@@ -261,8 +312,7 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
     //Get a buffered writer over the raw writer
     var writer = std.io.bufferedWriter(raw_writer);
 
-    var client = try allocator.create(Client);
-    client.* = Client{
+    var client_rc: RcClient = RcClient.init(Client{
         .socket = client_sock,
         .writer = writer,
         .username_buf = undefined,
@@ -272,7 +322,7 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
         .time_zone = 0,
         .write_mutex = std.Thread.Mutex{},
         .last_heard_from = std.time.timestamp(),
-        .user_id = undefined,
+        .user_id = @intCast(users.hash_map.count() + 1),
         .status = Packets.StatusUpdate{
             .beatmap_checksum = undefined,
             .beatmap_id = 0,
@@ -282,7 +332,9 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
             .status_text = "",
             .status_text_buf = undefined,
         },
-    };
+    }, allocator) catch unreachable;
+    var client = client_rc.data;
+
     @memset(&client.status.beatmap_checksum, 0);
 
     var buf: [4096]u8 = undefined;
@@ -344,9 +396,6 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
 
     //TODO: password check here!
 
-    //Return the user id (TODO: return unique IDs for each user)
-    client.user_id = 1;
-
     //The permissions the user has (TODO: ping some kind of database to get this information)
     const permissions = Packets.LoginPermissions{
         .normal = true,
@@ -381,7 +430,7 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
     var user_presence_packet = client.getPresencePacket();
 
     try thread_pool.spawn(sendPackets, .{
-        client,
+        client_rc.borrow(),
         .{
             protocol_negotiation_packet,
             login_response_packet,
@@ -397,7 +446,7 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
     //Assert the user id doesnt already exist
     std.debug.assert(!users.hash_map.remove(client.user_id));
     //Put the user into the hash map
-    try users.hash_map.put(client.user_id, client);
+    try users.hash_map.put(client.user_id, client_rc);
     defer users.mutex.unlock();
 
     //If we error later on, remove the user from the list
@@ -407,7 +456,9 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
     }
 }
 
-fn sendAvailableChannels(client: *Client, args: anytype) void {
+fn sendAvailableChannels(client_rc: RcClient, args: anytype) void {
+    defer client_rc.drop();
+    var client = client_rc.data;
     const thread_pool = args[0];
 
     //Iterate over all known channels,
@@ -424,7 +475,7 @@ fn sendAvailableChannels(client: *Client, args: anytype) void {
         if (@field(client.channels, field.name)) {
             //Send an available packet, then a success packet
             thread_pool.spawn(sendPackets, .{
-                client,
+                client_rc.borrow(),
                 .{
                     available_packet,
                     Packets.ChannelJoinSuccessPacket{
@@ -438,7 +489,7 @@ fn sendAvailableChannels(client: *Client, args: anytype) void {
             }) catch unreachable;
         } else {
             //Send only an available packet
-            thread_pool.spawn(sendPackets, .{ client, .{available_packet}, null, .{} }) catch unreachable;
+            thread_pool.spawn(sendPackets, .{ client_rc.borrow(), .{available_packet}, null, .{} }) catch unreachable;
         }
     }
 }
@@ -460,7 +511,9 @@ pub fn main() !void {
         var iter = users.hash_map.valueIterator();
 
         while (iter.next()) |next| {
-            allocator.destroy(next.*);
+            var client: RcClient = next.*;
+
+            client.drop();
         }
 
         users.hash_map.deinit();
