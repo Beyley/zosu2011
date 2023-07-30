@@ -28,13 +28,13 @@ pub fn sendPackets(client_rc: RcClient, packets: anytype, comptime after: ?fn (c
     }
 }
 
-fn keepaliveRun(thread_pool: *std.Thread.Pool, clients: *UserHashMap, run: *bool) void {
+fn keepaliveRun(run: *bool) void {
     while (run.*) {
         {
-            clients.mutex.lock();
-            defer clients.mutex.unlock();
+            users.mutex.lock();
+            defer users.mutex.unlock();
 
-            var iter = clients.hash_map.valueIterator();
+            var iter = users.hash_map.valueIterator();
 
             while (iter.next()) |next| {
                 thread_pool.spawn(sendPackets, .{
@@ -55,7 +55,7 @@ fn keepaliveRun(thread_pool: *std.Thread.Pool, clients: *UserHashMap, run: *bool
     }
 }
 
-fn handleClientData(client_rc: RcClient, users: *UserHashMap, thread_pool: *std.Thread.Pool) void {
+fn handleClientData(client_rc: RcClient) void {
     defer client_rc.drop();
 
     var client: *Client = client_rc.data;
@@ -82,7 +82,7 @@ fn handleClientData(client_rc: RcClient, users: *UserHashMap, thread_pool: *std.
                 std.debug.print("user {s} exiting...\n", .{client.username});
 
                 //TODO: handle user exits
-                //client_rc.drop();
+                client_rc.drop();
                 return;
             },
             .receive_updates => {
@@ -225,45 +225,37 @@ fn handleClientData(client_rc: RcClient, users: *UserHashMap, thread_pool: *std.
     }
 }
 
-// fn disconnectUser(client: RcClient, users: *UserHashMap, thread_pool: *std.Thread.Pool) !void {
-//     client.drop();
-//     //FIXME: THIS IS DUMB, PLEASE FIX THIS AT SOME POINT KTHXBYE
-//     while (client.reading.load(.SeqCst)) {
-//         // try std.Thread.yield();
-//         continue;
-//     }
-//     client.reading.store(true, .SeqCst);
+fn handleClientDisconnect(client: *const Client, allocator: std.mem.Allocator) void {
+    _ = allocator;
 
-//     //Lock the user hash map mutex
-//     users.mutex.lock();
-//     users.mutex.unlock();
+    //Lock the user hash map mutex
+    users.mutex.lock();
+    users.mutex.unlock();
 
-//     client.socket.close();
+    std.debug.print("closing user socket\n", .{});
 
-//     const user_id = client.user_id;
+    //Closing socket
+    client.socket.close();
 
-//     //Remove the user from the list
-//     std.debug.assert(users.hash_map.remove(user_id));
+    const user_id = client.user_id;
 
-//     //Grab the allocator out of the client
-//     const allocator = client.allocator;
+    std.debug.print("removing user from hash map\n", .{});
 
-//     //Set the client's contents to undefined
-//     client.* = undefined;
-//     //Destroy the client object
-//     allocator.destroy(client);
+    //Remove the user from the list
+    std.debug.assert(users.hash_map.remove(user_id));
 
-//     var iter = users.hash_map.valueIterator();
-//     while (iter.next()) |next| {
-//         const client_to_notify: RcClient = next.*;
+    std.debug.print("telling all users the user has left\n", .{});
+    var iter = users.hash_map.valueIterator();
+    while (iter.next()) |next| {
+        const client_to_notify: RcClient = next.*;
 
-//         try thread_pool.spawn(sendPackets, .{ client_to_notify.borrow(), .{Packets.HandleOsuQuitPacket{
-//             .data = .{ .user_id = user_id },
-//         }}, null, .{} });
-//     }
-// }
+        thread_pool.spawn(sendPackets, .{ client_to_notify.borrow(), .{Packets.HandleOsuQuitPacket{
+            .data = .{ .user_id = user_id },
+        }}, null, .{} }) catch unreachable;
+    }
+}
 
-fn checkForClientDataPeriodically(thread_pool: *std.Thread.Pool, users: *UserHashMap, run: *bool) void {
+fn checkForClientDataPeriodically(run: *bool) void {
     while (run.*) {
         {
             users.mutex.lock();
@@ -280,8 +272,6 @@ fn checkForClientDataPeriodically(thread_pool: *std.Thread.Pool, users: *UserHas
                     client.reading.store(true, std.atomic.Ordering.SeqCst);
                     thread_pool.spawn(handleClientData, .{
                         client_rc.borrow(),
-                        users,
-                        thread_pool,
                     }) catch @panic("OOM");
                 }
             }
@@ -299,13 +289,13 @@ const UserHashMap = struct {
     mutex: std.Thread.Mutex,
 };
 
-fn handleUserLogin(client_sock: network.Socket, server_socket: network.Socket, users: *UserHashMap, thread_pool: *std.Thread.Pool, allocator: std.mem.Allocator) void {
+fn handleUserLogin(client_sock: network.Socket, server_socket: network.Socket, allocator: std.mem.Allocator) void {
     std.debug.print("Client connected from {}\n", .{client_sock.getRemoteEndPoint() catch @panic("shit")});
 
-    handleUserHandshake(client_sock, server_socket, users, thread_pool, allocator) catch unreachable;
+    handleUserHandshake(client_sock, server_socket, allocator) catch unreachable;
 }
 
-fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socket, users: *UserHashMap, thread_pool: *std.Thread.Pool, allocator: std.mem.Allocator) !void {
+fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socket, allocator: std.mem.Allocator) !void {
     _ = server_socket;
     //Get the raw writer
     var raw_writer = client_sock.writer();
@@ -333,6 +323,7 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
             .status_text_buf = undefined,
         },
     }, allocator) catch unreachable;
+    client_rc.deinit_fn = handleClientDisconnect;
     var client = client_rc.data;
 
     @memset(&client.status.beatmap_checksum, 0);
@@ -439,7 +430,7 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
             user_presence_packet,
         },
         sendAvailableChannels,
-        .{thread_pool},
+        .{},
     });
 
     users.mutex.lock();
@@ -457,9 +448,9 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
 }
 
 fn sendAvailableChannels(client_rc: RcClient, args: anytype) void {
+    _ = args;
     defer client_rc.drop();
     var client = client_rc.data;
-    const thread_pool = args[0];
 
     //Iterate over all known channels,
     inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
@@ -494,6 +485,9 @@ fn sendAvailableChannels(client_rc: RcClient, args: anytype) void {
     }
 }
 
+var users: UserHashMap = undefined;
+var thread_pool: std.Thread.Pool = undefined;
+
 pub fn main() !void {
     try network.init();
     defer network.deinit();
@@ -503,7 +497,7 @@ pub fn main() !void {
 
     var allocator = gpa.allocator();
 
-    var users: UserHashMap = .{
+    users = .{
         .hash_map = UserHashMap.HashMap.init(allocator),
         .mutex = .{},
     };
@@ -530,7 +524,6 @@ pub fn main() !void {
     try server_socket.listen();
 
     //Create a thread pool to handle tasks like sending packets
-    var thread_pool: std.Thread.Pool = undefined;
     try thread_pool.init(.{ .allocator = allocator });
     defer thread_pool.deinit();
 
@@ -538,10 +531,10 @@ pub fn main() !void {
     defer run = false;
 
     //Spawn a thread to periodically send a "ping" to all clients, to make sure they havent died
-    var keepalive_thread = try std.Thread.spawn(.{}, keepaliveRun, .{ &thread_pool, &users, &run });
+    var keepalive_thread = try std.Thread.spawn(.{}, keepaliveRun, .{&run});
     try keepalive_thread.setName("ping");
 
-    var check_for_client_data_thread = try std.Thread.spawn(.{}, checkForClientDataPeriodically, .{ &thread_pool, &users, &run });
+    var check_for_client_data_thread = try std.Thread.spawn(.{}, checkForClientDataPeriodically, .{&run});
     try check_for_client_data_thread.setName("data");
 
     std.debug.print("Started server on port {d}\n", .{port});
@@ -556,6 +549,6 @@ pub fn main() !void {
         try client_socket.setWriteTimeout(timeout * std.time.us_per_s);
 
         //Make one of the threads in the thread pool handle the user logon
-        try thread_pool.spawn(handleUserLogin, .{ client_socket, server_socket, &users, &thread_pool, allocator });
+        try thread_pool.spawn(handleUserLogin, .{ client_socket, server_socket, allocator });
     }
 }
