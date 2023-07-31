@@ -2,10 +2,10 @@ const std = @import("std");
 const network = @import("network");
 const memutils = @import("memutils");
 
-const Client = @import("client.zig");
-const Packets = @import("packet.zig");
+const Bancho = @import("bancho/bancho.zig");
+const Client = Bancho.Client;
 
-const RcClient = memutils.Rc(Client);
+const RcClient = Bancho.RcClient;
 
 pub fn sendPackets(client_rc: RcClient, packets: anytype, comptime after: ?fn (client: RcClient, args: anytype) void, after_args: anytype) void {
     defer client_rc.drop();
@@ -39,7 +39,7 @@ fn keepaliveRun(run: *bool) void {
             while (iter.next()) |next| {
                 thread_pool.spawn(sendPackets, .{
                     next.*.borrow(),
-                    .{Packets.PingPacket{ .data = .{} }},
+                    .{Bancho.Packets.Server.Ping.create()},
                     null,
                     .{},
                 }) catch @panic("OOM");
@@ -67,7 +67,7 @@ fn handleClientData(client_rc: RcClient) void {
     while (client.socket.peek(&buf) catch unreachable != 0 or client.read_from_temp_buf < client.temp_read_buf_slice.len) {
         const reader = client.reader();
 
-        const packet_id: Packets.ClientPacketType = @enumFromInt(reader.readIntLittle(u16) catch unreachable);
+        const packet_id: Bancho.Packets.Client.PacketId = @enumFromInt(reader.readIntLittle(u16) catch unreachable);
         const compression = reader.readIntLittle(u8) catch unreachable;
         _ = compression;
         const payload_size = reader.readIntLittle(u32) catch unreachable;
@@ -76,23 +76,22 @@ fn handleClientData(client_rc: RcClient) void {
 
         switch (packet_id) {
             .exit => {
-                const update_available = reader.readIntLittle(Packets.BanchoInt) catch unreachable;
+                const update_available = reader.readIntLittle(Bancho.Int) catch unreachable;
                 _ = update_available;
 
-                std.debug.print("user {s} exiting...\n", .{client.username});
+                std.debug.print("user {s} exiting...\n", .{client.username.slice()});
 
-                //TODO: handle user exits
                 client_rc.drop();
                 return;
             },
             .receive_updates => {
-                const UpdateMode = enum(Packets.BanchoInt) {
+                const UpdateMode = enum(Bancho.Int) {
                     none = 0,
                     all = 1,
                     friends = 2,
                 };
 
-                const update_mode: UpdateMode = @enumFromInt(reader.readIntLittle(Packets.BanchoInt) catch unreachable);
+                const update_mode: UpdateMode = @enumFromInt(reader.readIntLittle(Bancho.Int) catch unreachable);
 
                 std.debug.print("receive_updates with mode {s}\n", .{@tagName(update_mode)});
 
@@ -114,7 +113,7 @@ fn handleClientData(client_rc: RcClient) void {
             },
             .channel_join => {
                 var channel_name_buf: [Client.MAX_CHANNEL_LENGTH]u8 = undefined;
-                const channel_name = Packets.readBanchoString(reader, &channel_name_buf) catch unreachable;
+                const channel_name = Bancho.Serialization.readBanchoString(reader, &channel_name_buf) catch unreachable;
 
                 std.debug.print("user trying to join channel {s}\n", .{channel_name});
 
@@ -124,9 +123,7 @@ fn handleClientData(client_rc: RcClient) void {
                     //If the name of the field and the channel name without the # equal,
                     if (std.mem.eql(u8, field.name, channel_name[1..])) {
                         thread_pool.spawn(sendPackets, .{ client_rc.borrow(), .{
-                            Packets.ChannelJoinSuccessPacket{
-                                .data = .{ .channel = "#" ++ field.name },
-                            },
+                            Bancho.Packets.Server.ChannelJoinSuccess.create("#" ++ field.name),
                         }, null, .{} }) catch unreachable;
 
                         //Mark that the user is in that channel
@@ -139,7 +136,7 @@ fn handleClientData(client_rc: RcClient) void {
             },
             .channel_leave => {
                 var channel_name_buf: [Client.MAX_CHANNEL_LENGTH]u8 = undefined;
-                const channel_name = Packets.readBanchoString(reader, &channel_name_buf) catch unreachable;
+                const channel_name = Bancho.Serialization.readBanchoString(reader, &channel_name_buf) catch unreachable;
 
                 std.debug.print("user trying to leave channel {s}\n", .{channel_name});
 
@@ -147,9 +144,7 @@ fn handleClientData(client_rc: RcClient) void {
                     //If the name of the field and the channel name without the # equal,
                     if (std.mem.eql(u8, field.name, channel_name[1..])) {
                         thread_pool.spawn(sendPackets, .{ client_rc.borrow(), .{
-                            Packets.ChannelRevokedPacket{
-                                .data = .{ .channel = "#" ++ field.name },
-                            },
+                            Bancho.Packets.Server.ChannelRevoked.create("#" ++ field.name),
                         }, null, .{} }) catch unreachable;
 
                         //Mark that the user is no longer in the channel
@@ -163,25 +158,19 @@ fn handleClientData(client_rc: RcClient) void {
             .send_irc_message => {
                 var buf2: [0]u8 = undefined;
                 //When the client sends send_irc_message, the `sender` field is never populated
-                _ = Packets.readBanchoString(reader, &buf2) catch unreachable;
+                _ = Bancho.Serialization.readBanchoString(reader, &buf2) catch unreachable;
                 var target_buf: [Client.MAX_CHANNEL_LENGTH]u8 = undefined;
-                const message = Packets.readBanchoString(reader, &buf) catch unreachable;
-                const target = Packets.readBanchoString(reader, &target_buf) catch unreachable;
+                const message = Bancho.Serialization.readBanchoString(reader, &buf) catch unreachable;
+                const target = Bancho.Serialization.readBanchoString(reader, &target_buf) catch unreachable;
 
                 //Assert the user doesnt try to send too long of a message
                 //TODO: cleanly handle this error case
-                std.debug.assert(message.len <= Packets.MAX_MESSAGE_SIZE);
+                std.debug.assert(message.len <= Bancho.MAX_MESSAGE_SIZE);
 
                 std.debug.print("message {s} to target {s}\n", .{ message, target });
 
                 inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
                     if (std.mem.eql(u8, field.name, target[1..])) {
-                        const create_message_packet = Packets.createSendMessagePacket(
-                            client.username,
-                            "#" ++ field.name,
-                            message,
-                        );
-
                         users.mutex.lock();
                         defer users.mutex.unlock();
 
@@ -192,18 +181,24 @@ fn handleClientData(client_rc: RcClient) void {
                             var target_client: RcClient = next.*;
 
                             //Dont send the message to the message sender
-                            if (target_client.get().user_id == client.user_id) {
+                            if (target_client.data.stats.user_id == client.stats.user_id) {
                                 continue;
                             }
 
                             //If the user is not in the channel
-                            if (!@field(target_client.get().channels, field.name)) {
+                            if (!@field(target_client.data.channels, field.name)) {
                                 //Skip this user
                                 continue;
                             }
 
-                            //If the are in the channel, send them the packet
-                            thread_pool.spawn(sendPackets, .{ target_client.borrow(), .{create_message_packet}, null, .{} }) catch unreachable;
+                            //If the are in the channel, send them a new packet
+                            //NOTE: the reason we construct the packet here is so that
+                            //      it gets borrowed for each time its sent in the network
+                            thread_pool.spawn(sendPackets, .{ target_client.borrow(), .{Bancho.Packets.Server.SendMessage.create_channel_target(
+                                client_rc.borrow(),
+                                "#" ++ field.name,
+                                message,
+                            )}, null, .{} }) catch unreachable;
                         }
 
                         break;
@@ -230,14 +225,14 @@ fn handleClientDisconnect(client: *const Client, allocator: std.mem.Allocator) v
 
     //Lock the user hash map mutex
     users.mutex.lock();
-    users.mutex.unlock();
+    defer users.mutex.unlock();
 
     std.debug.print("closing user socket\n", .{});
 
     //Closing socket
     client.socket.close();
 
-    const user_id = client.user_id;
+    const user_id = client.stats.user_id;
 
     std.debug.print("removing user from hash map\n", .{});
 
@@ -249,9 +244,9 @@ fn handleClientDisconnect(client: *const Client, allocator: std.mem.Allocator) v
     while (iter.next()) |next| {
         const client_to_notify: RcClient = next.*;
 
-        thread_pool.spawn(sendPackets, .{ client_to_notify.borrow(), .{Packets.HandleOsuQuitPacket{
-            .data = .{ .user_id = user_id },
-        }}, null, .{} }) catch unreachable;
+        thread_pool.spawn(sendPackets, .{ client_to_notify.borrow(), .{
+            Bancho.Packets.Server.HandleOsuQuit.create(user_id),
+        }, null, .{} }) catch unreachable;
     }
 }
 
@@ -283,7 +278,7 @@ fn checkForClientDataPeriodically(run: *bool) void {
 }
 
 const UserHashMap = struct {
-    pub const HashMap = std.AutoHashMap(Packets.BanchoInt, RcClient);
+    pub const HashMap = std.AutoHashMap(Bancho.Int, RcClient);
 
     hash_map: HashMap,
     mutex: std.Thread.Mutex,
@@ -305,31 +300,45 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
     var client_rc: RcClient = RcClient.init(Client{
         .socket = client_sock,
         .writer = writer,
-        .username_buf = undefined,
-        .username = &.{},
+        .username = .{
+            .str = undefined,
+            .len = 0,
+        },
         .password = undefined,
         .display_city = false,
         .time_zone = 0,
         .write_mutex = std.Thread.Mutex{},
         .last_heard_from = std.time.timestamp(),
-        .user_id = @intCast(users.hash_map.count() + 1),
-        .status = Packets.StatusUpdate{
-            .beatmap_checksum = undefined,
-            .beatmap_id = 0,
-            .current_mods = .{},
-            .play_mode = .osu,
-            .status = .idle,
-            .status_text = "",
-            .status_text_buf = undefined,
+        .permissions = .{
+            .bat = false,
+            .supporter = false,
+            .friend = false,
+        },
+        .stats = .{
+            .accuracy = 1,
+            .play_count = 0,
+            .rank = 69,
+            .ranked_score = 2,
+            .total_score = 3,
+            .user_id = @intCast(users.hash_map.count() + 1),
+            .status = Client.Status{
+                .beatmap_checksum = .{ .str = undefined, .len = 0 },
+                .beatmap_id = 0,
+                .current_mods = .{},
+                .play_mode = .osu,
+                .status = .idle,
+                .status_text = .{
+                    .str = undefined,
+                    .len = 0,
+                },
+            },
         },
     }, allocator) catch unreachable;
     client_rc.deinit_fn = handleClientDisconnect;
-    var client = client_rc.data;
+    var client: *Client = client_rc.data;
 
     //If something bad has happened, just drop the client
     errdefer client_rc.drop();
-
-    @memset(&client.status.beatmap_checksum, 0);
 
     var buf: [4096]u8 = undefined;
 
@@ -347,9 +356,8 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
     if (read.len > Client.MAX_USERNAME_LENGTH) return error.UsernameTooLong;
 
     //Copy in the client username
-    @memcpy(client.username_buf[0..read.len], read);
-    //Set the client username slice to the right size
-    client.username = client.username_buf[0..read.len];
+    @memcpy(client.username.str[0..read.len], read);
+    client.username.len = read.len;
 
     read = try reader.readUntilDelimiter(&buf, '\n');
 
@@ -385,13 +393,13 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
         @panic("INCORRECT VERSION");
     }
 
-    std.debug.print("client logging in, name {s} password {x}\n", .{ client.username, @as(u128, @bitCast(client.password)) });
+    std.debug.print("client logging in, name {s} password {x}\n", .{ client.username.slice(), @as(u128, @bitCast(client.password)) });
     std.debug.print("version {s}\ntime_zone {d}\ndisplay_city {}\nosu_hash {s}\n", .{ version, client.time_zone, client.display_city, osu_hash });
 
     //TODO: password check here!
 
     //The permissions the user has (TODO: ping some kind of database to get this information)
-    const permissions = Packets.LoginPermissions{
+    client.permissions = Client.Permissions{
         .normal = true,
         .supporter = true,
         .bat = false,
@@ -399,23 +407,13 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
     };
 
     //When a client connects we need to tell it what protocol version we are using
-    var protocol_negotiation_packet = Packets.ProtocolNegotiationPacket{
-        .data = .{},
-    };
+    var protocol_negotiation_packet = Bancho.Packets.Server.ProtocolNegotiation.create();
 
     //After the client has been told about the protocol version, send a login reply
-    var login_response_packet = Packets.LoginReplyPacket{
-        .data = .{
-            .login_response = .{ .user_id = client.user_id },
-        },
-    };
+    var login_response_packet = Bancho.Packets.Server.LoginResponse.create(.{ .user_id = client.stats.user_id });
 
     //After the client knows it was a successful login, send them their permissions
-    var login_permissions_packet = Packets.LoginPermissionsPacket{
-        .data = .{
-            .permissions = permissions,
-        },
-    };
+    var login_permissions_packet = Bancho.Packets.Server.LoginPermissions.create(client.permissions);
 
     var user_data_packet = client.getUserUpdatePacket();
 
@@ -438,9 +436,9 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
 
     users.mutex.lock();
     //Assert the user id doesnt already exist
-    std.debug.assert(!users.hash_map.remove(client.user_id));
+    std.debug.assert(!users.hash_map.remove(client.stats.user_id));
     //Put the user into the hash map
-    try users.hash_map.put(client.user_id, client_rc);
+    try users.hash_map.put(client.stats.user_id, client_rc);
     defer users.mutex.unlock();
 
     //If we error later on, remove the user from the list
@@ -459,11 +457,7 @@ fn sendAvailableChannels(client_rc: RcClient, args: anytype) void {
     inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
         const channel_name = "#" ++ field.name;
 
-        const available_packet = Packets.ChannelAvailablePacket{
-            .data = .{
-                .channel = channel_name,
-            },
-        };
+        const available_packet = Bancho.Packets.Server.ChannelAvailable.create(channel_name);
 
         //If the user has joined the channel,
         if (@field(client.channels, field.name)) {
@@ -472,11 +466,7 @@ fn sendAvailableChannels(client_rc: RcClient, args: anytype) void {
                 client_rc.borrow(),
                 .{
                     available_packet,
-                    Packets.ChannelJoinSuccessPacket{
-                        .data = .{
-                            .channel = channel_name,
-                        },
-                    },
+                    Bancho.Packets.Server.ChannelJoinSuccess.create(channel_name),
                 },
                 null,
                 .{},

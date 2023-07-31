@@ -1,25 +1,28 @@
 const std = @import("std");
 const network = @import("network");
 
-const Packets = @import("packet.zig");
+const Bancho = @import("../bancho.zig");
 
 const Self = @This();
 
+pub const Permissions = @import("permissions.zig").Permissions;
+pub const Status = @import("status.zig");
+pub const Stats = @import("stats.zig");
+pub const Presence = @import("presence.zig");
+
 pub const MAX_USERNAME_LENGTH = 32;
 
-user_id: Packets.BanchoInt,
-username_buf: [MAX_USERNAME_LENGTH]u8,
-username: []u8,
+username: Bancho.ArrayString(MAX_USERNAME_LENGTH),
 password: [std.crypto.hash.Md5.digest_length]u8,
 socket: network.Socket,
 writer: std.io.BufferedWriter(4096, network.Socket.Writer),
 write_mutex: std.Thread.Mutex,
 last_heard_from: i64,
+permissions: Permissions,
+stats: Stats,
 
 time_zone: i8,
 display_city: bool,
-
-status: Packets.StatusUpdate,
 
 //A set of temporary buffers we read into inside the `read` function
 temp_read_buf: [4096]u8 = undefined,
@@ -60,45 +63,34 @@ pub fn reset_read(self: *Self) !void {
     self.temp_read_buf_slice = self.temp_read_buf[0..self.socket.receive(&self.temp_read_buf)];
 }
 
+pub const Writer = std.io.BufferedWriter(4096, network.Socket.Writer).Writer;
 pub const Reader = std.io.Reader(*Self, network.Socket.Reader.Error, read);
 
-pub fn getPresencePacket(self: Self) Packets.UserPresencePacket {
-    return Packets.UserPresencePacket{
+pub fn getPresencePacket(self: Self) Bancho.Packets.Server.UserPresence.Packet {
+    return Bancho.Packets.Server.UserPresence.Packet{
         .data = .{
-            .user_presence = Packets.UserPresence{
-                .username = self.username,
-                .user_id = self.user_id,
+            .user_presence = Presence{
+                .username = .{
+                    .str = self.username.str[0 .. self.username.len orelse self.username.str.len],
+                },
+                .user_id = self.stats.user_id,
                 .timezone = self.time_zone,
-                .rank = 1, //TODO
-                .permissions = Packets.LoginPermissions{
-                    .normal = true,
-                    .supporter = true,
-                    .bat = false,
-                    .friend = false,
-                }, //TODO
+                .rank = self.stats.rank, //TODO
+                .permissions = self.permissions,
                 .longitude = 0, //TODO
                 .latitude = 0, //TODO
                 .country = 0, //TODO
-                .city = "", //TODO
+                .city = .{ .str = &.{} }, //TODO
                 .avatar_extension = .none,
             },
         },
     };
 }
 
-pub fn getUserUpdatePacket(self: Self) Packets.UserUpdatePacket {
-    return Packets.UserUpdatePacket{
+pub fn getUserUpdatePacket(self: Self) Bancho.Packets.Server.UserUpdate.Packet {
+    return Bancho.Packets.Server.UserUpdate.Packet{
         .data = .{
-            .user_stats = Packets.UserStats{
-                .user_id = self.user_id,
-                .total_score = 0, //TODO
-                .status = self.status,
-                .ranked_score = 0, //TODO
-                .rank = 1, //TODO
-                .play_count = 0, //TODO
-                .level = 0, //TODO
-                .accuracy = 1, //TODO
-            },
+            .user_stats = self.stats,
         },
     };
 }
