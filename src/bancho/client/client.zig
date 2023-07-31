@@ -3,6 +3,8 @@ const network = @import("network");
 
 const Bancho = @import("../bancho.zig");
 
+const Main = @import("../../main.zig");
+
 const Self = @This();
 
 pub const Permissions = @import("permissions.zig").Permissions;
@@ -87,6 +89,38 @@ pub fn getPresencePacket(self: Self) Bancho.Packets.Server.UserPresence.Packet {
     };
 }
 
+pub fn sendAvailableChannels(client_rc: Bancho.RcClient, args: anytype) void {
+    _ = args;
+    defer client_rc.drop();
+    var client = client_rc.data;
+
+    //Iterate over all known channels,
+    inline for (@typeInfo(AvailableChannels).Struct.fields) |field| {
+        const channel_name = "#" ++ field.name;
+
+        const available_packet = Bancho.Packets.Server.ChannelAvailable.create(channel_name);
+
+        //If the user has joined the channel,
+        if (@field(client.channels, field.name)) {
+            //Send an available packet, then a success packet
+            Main.thread_pool.spawn(Bancho.sendPackets, .{
+                client_rc.borrow(),
+                .{
+                    available_packet,
+                    Bancho.Packets.Server.ChannelJoinSuccess.create(channel_name),
+                },
+                null,
+                .{},
+            }) catch unreachable;
+        } else {
+            //Send only an available packet
+            Main.thread_pool.spawn(
+                Bancho.sendPackets,
+                .{ client_rc.borrow(), .{available_packet}, null, .{} },
+            ) catch unreachable;
+        }
+    }
+}
 pub fn getUserUpdatePacket(self: Self) Bancho.Packets.Server.UserUpdate.Packet {
     return Bancho.Packets.Server.UserUpdate.Packet{
         .data = .{
