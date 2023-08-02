@@ -354,7 +354,7 @@ fn handleClientData(client_rc: RcClient) void {
                 std.debug.print("receive_updates with mode {s}\n", .{@tagName(packet.data.update_mode)});
 
                 //If the user specified no data updates, break out and dont send anything
-                if (packet.data.update_mode != .none) {
+                if (packet.data.update_mode == .none) {
                     break;
                 }
 
@@ -431,6 +431,9 @@ fn handleClientData(client_rc: RcClient) void {
                     target,
                 });
 
+                //Assert the channel starts with a # in the name
+                std.debug.assert(target[0] == '#');
+
                 inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
                     if (std.mem.eql(u8, field.name, target[1..])) {
                         Main.users.mutex.lock();
@@ -463,6 +466,39 @@ fn handleClientData(client_rc: RcClient) void {
                             )}, null, .{} }) catch unreachable;
                         }
 
+                        break;
+                    }
+                }
+            },
+            .send_irc_message_private => {
+                const packet = Packets.Client.SendIrcMessage.deserialize(reader) catch unreachable;
+
+                const target = packet.data.target.slice();
+                const message = packet.data.message.slice();
+
+                Main.users.mutex.lock();
+                defer Main.users.mutex.unlock();
+
+                var iter = Main.users.hash_map.valueIterator();
+
+                while (iter.next()) |next| {
+                    var target_client_rc: RcClient = next.*;
+                    var target_client: *Client = target_client_rc.data;
+
+                    const username = target_client.username.slice();
+
+                    //If the username matches
+                    if (std.mem.eql(u8, username, target)) {
+                        Main.thread_pool.spawn(sendPackets, .{
+                            target_client_rc.borrow(),
+                            .{Packets.Server.SendMessage.create_client_target(
+                                client_rc.borrow(),
+                                target_client_rc.borrow(),
+                                message,
+                            )},
+                            null,
+                            .{},
+                        }) catch unreachable;
                         break;
                     }
                 }
