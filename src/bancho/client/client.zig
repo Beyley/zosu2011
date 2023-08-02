@@ -72,9 +72,7 @@ pub fn getPresencePacket(self: Self) Bancho.Packets.Server.UserPresence.Packet {
     return Bancho.Packets.Server.UserPresence.Packet{
         .data = .{
             .user_presence = Presence{
-                .username = .{
-                    .str = self.username.str[0 .. self.username.len orelse self.username.str.len],
-                },
+                .username = self.username,
                 .user_id = self.stats.user_id,
                 .timezone = self.time_zone,
                 .rank = self.stats.rank, //TODO
