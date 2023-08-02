@@ -16,6 +16,7 @@ pub fn Packet(comptime packet_id: anytype, comptime DataType: type) type {
 
         const Self = @This();
 
+        //Serializes a packet to the stream
         pub fn serialize(self: Self, writer: Bancho.Client.Writer) !void {
             const use_compression = false;
 
@@ -29,6 +30,12 @@ pub fn Packet(comptime packet_id: anytype, comptime DataType: type) type {
             try self.data.serialize(writer);
 
             std.debug.print("sending packet {s} with data {}\n", .{ @tagName(packet_id), self.data });
+        }
+
+        /// Deserializes a packet from the stream
+        /// NOTE: this does not read the packet id, compression, or length
+        pub fn deserialize(reader: Bancho.Client.Reader) !Self {
+            return .{ .data = try DataType.deserialize(reader) };
         }
     };
 }

@@ -35,18 +35,30 @@ pub const String = struct {
 ///A serializable network string, with a max size known at comptime
 pub fn ArrayString(comptime length: comptime_int) type {
     return struct {
+        const Self = @This();
+
         str: [length]u8,
         len: ?usize,
 
-        pub fn size(self: @This()) u32 {
+        //The network size of the string
+        pub fn size(self: Self) u32 {
             return Serialization.banchoStringSize(self.str[0 .. self.len orelse length]);
         }
 
-        pub fn serialize(self: *const @This(), writer: Client.Writer) !void {
+        pub fn serialize(self: *const Self, writer: Client.Writer) !void {
             try Serialization.writeBanchoString(writer, self.str[0 .. self.len orelse length]);
         }
 
-        pub fn slice(self: *const @This()) []const u8 {
+        pub fn deserialize(reader: Client.Reader) !Self {
+            var self: Self = undefined;
+
+            var str = try Serialization.readBanchoString(reader, &self.str);
+            self.len = str.len;
+
+            return self;
+        }
+
+        pub fn slice(self: *const Self) []const u8 {
             return self.str[0 .. self.len orelse self.str.len];
         }
     };
@@ -328,8 +340,8 @@ fn handleClientData(client_rc: RcClient) void {
 
         switch (packet_id) {
             .exit => {
-                const update_available = reader.readIntLittle(Int) catch unreachable;
-                _ = update_available;
+                const packet = Packets.Client.Exit.deserialize(reader) catch unreachable;
+                _ = packet;
 
                 std.debug.print("user {s} exiting...\n", .{client.username.slice()});
 
@@ -337,15 +349,14 @@ fn handleClientData(client_rc: RcClient) void {
                 return;
             },
             .receive_updates => {
-                const UpdateMode = enum(Int) {
-                    none = 0,
-                    all = 1,
-                    friends = 2,
-                };
+                const packet = Packets.Client.ReceiveUpdates.deserialize(reader) catch unreachable;
 
-                const update_mode: UpdateMode = @enumFromInt(reader.readIntLittle(Int) catch unreachable);
+                std.debug.print("receive_updates with mode {s}\n", .{@tagName(packet.data.update_mode)});
 
-                std.debug.print("receive_updates with mode {s}\n", .{@tagName(update_mode)});
+                //If the user specified no data updates, break out and dont send anything
+                if (packet.data.update_mode != .none) {
+                    break;
+                }
 
                 Main.users.mutex.lock();
                 defer Main.users.mutex.unlock();
@@ -364,16 +375,17 @@ fn handleClientData(client_rc: RcClient) void {
                 }
             },
             .channel_join => {
-                var channel_name_buf: [Client.MAX_CHANNEL_LENGTH]u8 = undefined;
-                const channel_name = Serialization.readBanchoString(reader, &channel_name_buf) catch unreachable;
+                const packet = Packets.Client.ChannelJoin.deserialize(reader) catch unreachable;
 
-                std.debug.print("user trying to join channel {s}\n", .{channel_name});
+                const channel = packet.data.channel.slice();
+
+                std.debug.print("user trying to join channel {s}\n", .{channel});
 
                 //TODO: check permissions
 
                 inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
                     //If the name of the field and the channel name without the # equal,
-                    if (std.mem.eql(u8, field.name, channel_name[1..])) {
+                    if (std.mem.eql(u8, field.name, channel[1..])) {
                         Main.thread_pool.spawn(sendPackets, .{ client_rc.borrow(), .{
                             Packets.Server.ChannelJoinSuccess.create("#" ++ field.name),
                         }, null, .{} }) catch unreachable;
@@ -387,14 +399,15 @@ fn handleClientData(client_rc: RcClient) void {
                 }
             },
             .channel_leave => {
-                var channel_name_buf: [Client.MAX_CHANNEL_LENGTH]u8 = undefined;
-                const channel_name = Serialization.readBanchoString(reader, &channel_name_buf) catch unreachable;
+                const packet = Packets.Client.ChannelLeave.deserialize(reader) catch unreachable;
 
-                std.debug.print("user trying to leave channel {s}\n", .{channel_name});
+                const channel = packet.data.channel.slice();
+
+                std.debug.print("user trying to leave channel {s}\n", .{channel});
 
                 inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
                     //If the name of the field and the channel name without the # equal,
-                    if (std.mem.eql(u8, field.name, channel_name[1..])) {
+                    if (std.mem.eql(u8, field.name, channel[1..])) {
                         Main.thread_pool.spawn(sendPackets, .{ client_rc.borrow(), .{
                             Packets.Server.ChannelRevoked.create("#" ++ field.name),
                         }, null, .{} }) catch unreachable;
@@ -408,18 +421,15 @@ fn handleClientData(client_rc: RcClient) void {
                 }
             },
             .send_irc_message => {
-                var buf2: [0]u8 = undefined;
-                //When the client sends send_irc_message, the `sender` field is never populated
-                _ = Serialization.readBanchoString(reader, &buf2) catch unreachable;
-                var target_buf: [Client.MAX_CHANNEL_LENGTH]u8 = undefined;
-                const message = Serialization.readBanchoString(reader, &buf) catch unreachable;
-                const target = Serialization.readBanchoString(reader, &target_buf) catch unreachable;
+                var packet = Packets.Client.SendIrcMessage.deserialize(reader) catch unreachable;
 
-                //Assert the user doesnt try to send too long of a message
-                //TODO: cleanly handle this error case
-                std.debug.assert(message.len <= MAX_MESSAGE_SIZE);
+                const message = packet.data.message.slice();
+                const target = packet.data.target.slice();
 
-                std.debug.print("message {s} to target {s}\n", .{ message, target });
+                std.debug.print("message {s} to target {s}\n", .{
+                    message,
+                    target,
+                });
 
                 inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
                     if (std.mem.eql(u8, field.name, target[1..])) {
