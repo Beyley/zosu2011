@@ -28,7 +28,7 @@ pub const String = struct {
         return Serialization.banchoStringSize(self.str);
     }
 
-    pub fn serialize(self: String, writer: Client.Writer) !void {
+    pub fn serialize(self: *const String, writer: Client.Writer) !void {
         try Serialization.writeBanchoString(writer, self.str);
     }
 };
@@ -42,7 +42,7 @@ pub fn ArrayString(comptime length: comptime_int) type {
             return Serialization.banchoStringSize(self.str[0 .. self.len orelse length]);
         }
 
-        pub fn serialize(self: @This(), writer: Client.Writer) !void {
+        pub fn serialize(self: *const @This(), writer: Client.Writer) !void {
             try Serialization.writeBanchoString(writer, self.str[0 .. self.len orelse length]);
         }
 

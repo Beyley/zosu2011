@@ -37,11 +37,11 @@ pub const Packet = Packets.Packet(PacketId.send_message, struct {
 
     pub fn serialize(self: Self, writer: Bancho.Client.Writer) !void {
         try self.sender.data.username.serialize(writer);
+        try self.message.serialize(writer);
         switch (self.target) {
             .client => |target| try target.data.username.serialize(writer),
             .channel => |channel| try channel.serialize(writer),
         }
-        try self.message.serialize(writer);
 
         //Mark that the message is serialized, so drop our reference to the target and sender
         self.sender.drop();
