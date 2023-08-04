@@ -12,9 +12,7 @@ pub const Status = @import("status.zig");
 pub const Stats = @import("stats.zig");
 pub const Presence = @import("presence.zig");
 
-pub const MAX_USERNAME_LENGTH = 32;
-
-username: Bancho.ArrayString(MAX_USERNAME_LENGTH),
+username: Bancho.ArrayString(Bancho.MAX_USERNAME_LENGTH),
 password: [std.crypto.hash.Md5.digest_length]u8,
 socket: network.Socket,
 writer: std.io.BufferedWriter(4096, network.Socket.Writer),
@@ -36,29 +34,7 @@ reading: std.atomic.Atomic(bool) = std.atomic.Atomic(bool).init(false),
 bytes_read: usize = 0,
 
 ///The channels the user is currently in
-channels: AvailableChannels = .{},
-
-fn maxChannelLength() comptime_int {
-    var max_channel_length = MAX_USERNAME_LENGTH;
-
-    inline for (@typeInfo(AvailableChannels).Struct.fields) |field| {
-        if (field.name.len > max_channel_length) {
-            max_channel_length = field.name.len;
-        }
-    }
-
-    return max_channel_length;
-}
-
-pub const MAX_CHANNEL_LENGTH = maxChannelLength();
-
-///A struct containing all the available channels
-pub const AvailableChannels = struct {
-    osu: bool = true,
-    taiko: bool = false,
-    ctb: bool = false,
-    ziglang: bool = false,
-};
+channels: Bancho.AvailableChannels = .{},
 
 ///Resets the read buffer, ignoring all data from the previous read
 pub fn reset_read(self: *Self) !void {
@@ -93,7 +69,7 @@ pub fn sendAvailableChannels(client_rc: Bancho.RcClient, args: anytype) void {
     var client = client_rc.data;
 
     //Iterate over all known channels,
-    inline for (@typeInfo(AvailableChannels).Struct.fields) |field| {
+    inline for (@typeInfo(Bancho.AvailableChannels).Struct.fields) |field| {
         const channel_name = "#" ++ field.name;
 
         const available_packet = Bancho.Packets.Server.ChannelAvailable.create(channel_name);
@@ -118,13 +94,6 @@ pub fn sendAvailableChannels(client_rc: Bancho.RcClient, args: anytype) void {
             ) catch unreachable;
         }
     }
-}
-pub fn getUserUpdatePacket(self: Self) Bancho.Packets.Server.UserUpdate.Packet {
-    return Bancho.Packets.Server.UserUpdate.Packet{
-        .data = .{
-            .user_stats = self.stats,
-        },
-    };
 }
 
 pub fn reader(self: *Self) Reader {

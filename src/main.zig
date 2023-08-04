@@ -74,6 +74,7 @@ pub fn main() !void {
         //Timeout in seconds
         const timeout = 10;
 
+        //Set the client socket read/write timeouts
         try client_socket.setReadTimeout(timeout * std.time.us_per_s);
         try client_socket.setWriteTimeout(timeout * std.time.us_per_s);
 

@@ -25,14 +25,12 @@ pub const StatusType = enum(Bancho.Byte) {
     osu_direct,
 };
 
-pub const MAX_STATUS_TEXT_LENGTH = 64;
-//The checksum of the beatmap the user is currentlyplaying on, 2x the actual digest length since its encoded as ASCII text
 beatmap_checksum: Bancho.ArrayString(std.crypto.hash.Md5.digest_length * 2),
 beatmap_id: Bancho.Int,
 current_mods: Bancho.Mods,
 play_mode: PlayMode,
 status: StatusType,
-status_text: Bancho.ArrayString(MAX_STATUS_TEXT_LENGTH),
+status_text: Bancho.ArrayString(Bancho.MAX_STATUS_LENGTH),
 
 const Self = @This();
 
@@ -48,4 +46,15 @@ pub fn serialize(self: Self, writer: Bancho.Client.Writer) !void {
     try writer.writeIntLittle(Bancho.UShort, @as(Bancho.UShort, @truncate(@as(u32, @bitCast(self.current_mods)))));
     try writer.writeIntLittle(Bancho.Byte, @intFromEnum(self.play_mode));
     try writer.writeIntLittle(Bancho.Int, self.beatmap_id);
+}
+
+pub fn deserialize(reader: Bancho.Client.Reader) !Self {
+    return .{
+        .status = @enumFromInt(try reader.readByte()),
+        .status_text = try Bancho.ArrayString(Bancho.MAX_STATUS_LENGTH).deserialize(reader),
+        .beatmap_checksum = try Bancho.ArrayString(std.crypto.hash.Md5.digest_length * 2).deserialize(reader),
+        .current_mods = @bitCast(@as(u32, try reader.readIntLittle(Bancho.UShort))),
+        .play_mode = @enumFromInt(try reader.readByte()),
+        .beatmap_id = try reader.readIntLittle(Bancho.Int),
+    };
 }

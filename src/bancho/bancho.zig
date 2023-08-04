@@ -67,8 +67,35 @@ pub fn ArrayString(comptime length: comptime_int) type {
 //Latest protocol version referenced in the 2011 client
 pub const ProtocolVersion = 7;
 
+pub const MAX_STATUS_LENGTH = 128;
+
 ///The maximum length of messages
 pub const MAX_MESSAGE_SIZE = 256;
+
+///The maximum size of usernames
+pub const MAX_USERNAME_LENGTH = 32;
+
+fn maxChannelLength() comptime_int {
+    var max_channel_length = MAX_USERNAME_LENGTH;
+
+    inline for (@typeInfo(AvailableChannels).Struct.fields) |field| {
+        if (field.name.len > max_channel_length) {
+            max_channel_length = field.name.len;
+        }
+    }
+
+    return max_channel_length;
+}
+
+pub const MAX_CHANNEL_LENGTH = maxChannelLength();
+
+///A struct containing all the available channels
+pub const AvailableChannels = struct {
+    osu: bool = true,
+    taiko: bool = false,
+    ctb: bool = false,
+    ziglang: bool = false,
+};
 
 pub const Mods = packed struct(Int) {
     padding: u32 = 0,
@@ -176,7 +203,7 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
 
     //If the username length is too long, return out
     //TODO: return real error here to the client
-    if (read.len > Client.MAX_USERNAME_LENGTH) return error.UsernameTooLong;
+    if (read.len > MAX_USERNAME_LENGTH) return error.UsernameTooLong;
 
     //Copy in the client username
     @memcpy(client.username.str[0..read.len], read);
@@ -238,7 +265,7 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
     //After the client knows it was a successful login, send them their permissions
     var login_permissions_packet = Packets.Server.LoginPermissions.create(client.permissions);
 
-    var user_data_packet = client.getUserUpdatePacket();
+    var user_data_packet = Packets.Server.HandleOsuUpdate.create(client.stats, null);
 
     //Send the user a presence packet, giving all the nessesary info about themselves,
     //With this the client is happy to report that it is no longer "recieving data"
@@ -370,7 +397,7 @@ fn handleClientData(client_rc: RcClient) void {
 
                     Main.thread_pool.spawn(sendPackets, .{ client_rc.borrow(), .{
                         updated_client.getPresencePacket(),
-                        updated_client.getUserUpdatePacket(),
+                        Packets.Server.HandleOsuUpdate.create(updated_client.stats, next.*.borrow()),
                     }, null, .{} }) catch unreachable;
                 }
             },
@@ -383,7 +410,7 @@ fn handleClientData(client_rc: RcClient) void {
 
                 //TODO: check permissions
 
-                inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
+                inline for (@typeInfo(AvailableChannels).Struct.fields) |field| {
                     //If the name of the field and the channel name without the # equal,
                     if (std.mem.eql(u8, field.name, channel[1..])) {
                         Main.thread_pool.spawn(sendPackets, .{ client_rc.borrow(), .{
@@ -405,7 +432,7 @@ fn handleClientData(client_rc: RcClient) void {
 
                 std.debug.print("user trying to leave channel {s}\n", .{channel});
 
-                inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
+                inline for (@typeInfo(AvailableChannels).Struct.fields) |field| {
                     //If the name of the field and the channel name without the # equal,
                     if (std.mem.eql(u8, field.name, channel[1..])) {
                         Main.thread_pool.spawn(sendPackets, .{ client_rc.borrow(), .{
@@ -434,7 +461,7 @@ fn handleClientData(client_rc: RcClient) void {
                 //Assert the channel starts with a # in the name
                 std.debug.assert(target[0] == '#');
 
-                inline for (@typeInfo(Client.AvailableChannels).Struct.fields) |field| {
+                inline for (@typeInfo(AvailableChannels).Struct.fields) |field| {
                     if (std.mem.eql(u8, field.name, target[1..])) {
                         Main.users.mutex.lock();
                         defer Main.users.mutex.unlock();
@@ -501,6 +528,38 @@ fn handleClientData(client_rc: RcClient) void {
                         }) catch unreachable;
                         break;
                     }
+                }
+            },
+            .send_user_status => {
+                const packet = Packets.Client.SendUserStatus.deserialize(reader) catch unreachable;
+
+                std.debug.print("got status\n\tbmcs:{s}\n\tbmid:{d}\n\tmods:{}\n\tmode:{s}\n\ttype:{s}\n\ttext:{s}\n", .{
+                    packet.data.status.beatmap_checksum.slice(),
+                    packet.data.status.beatmap_id,
+                    packet.data.status.current_mods,
+                    @tagName(packet.data.status.play_mode),
+                    @tagName(packet.data.status.status),
+                    packet.data.status.status_text.slice(),
+                });
+
+                client.stats.status = packet.data.status;
+
+                Main.users.mutex.lock();
+                defer Main.users.mutex.unlock();
+
+                var iter = Main.users.hash_map.valueIterator();
+
+                while (iter.next()) |next| {
+                    var target_rc: RcClient = next.*;
+                    var target: *Client = target_rc.data;
+                    _ = target;
+
+                    Main.thread_pool.spawn(sendPackets, .{
+                        target_rc.borrow(),
+                        .{Packets.Server.HandleOsuUpdate.create(client.stats, target_rc.borrow())},
+                        null,
+                        .{},
+                    }) catch unreachable;
                 }
             },
             else => {
