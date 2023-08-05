@@ -6,3 +6,4 @@ pub const ChannelJoin = @import("decls/channel_join.zig").Packet;
 pub const ChannelLeave = @import("decls/channel_leave.zig").Packet;
 pub const SendIrcMessage = @import("decls/send_irc_message.zig").Packet;
 pub const SendUserStatus = @import("decls/send_user_status.zig").Packet;
+pub const ErrorReport = @import("decls/error_report.zig").Packet;

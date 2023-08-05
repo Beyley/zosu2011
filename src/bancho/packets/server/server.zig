@@ -11,3 +11,5 @@ pub const ChannelJoinSuccess = @import("decls/channel_join_success.zig");
 pub const ChannelRevoked = @import("decls/channel_revoked.zig");
 pub const HandleOsuQuit = @import("decls/handle_osu_quit.zig");
 pub const SendMessage = @import("decls/send_message.zig");
+pub const LobbyJoin = @import("decls/lobby_join.zig");
+pub const LobbyPart = @import("decls/lobby_part.zig");

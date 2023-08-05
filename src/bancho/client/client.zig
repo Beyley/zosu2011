@@ -20,6 +20,7 @@ write_mutex: std.Thread.Mutex,
 last_heard_from: i64,
 permissions: Permissions,
 stats: Stats,
+in_lobby: bool,
 
 time_zone: i8,
 display_city: bool,
@@ -44,22 +45,18 @@ pub fn reset_read(self: *Self) !void {
 pub const Writer = std.io.BufferedWriter(4096, network.Socket.Writer).Writer;
 pub const Reader = std.io.Reader(*Self, network.Socket.Reader.Error, read);
 
-pub fn getPresencePacket(self: Self) Bancho.Packets.Server.UserPresence.Packet {
-    return Bancho.Packets.Server.UserPresence.Packet{
-        .data = .{
-            .user_presence = Presence{
-                .username = self.username,
-                .user_id = self.stats.user_id,
-                .timezone = self.time_zone,
-                .rank = self.stats.rank, //TODO
-                .permissions = self.permissions,
-                .longitude = 0, //TODO
-                .latitude = 0, //TODO
-                .country = 0, //TODO
-                .city = .{ .str = &.{} }, //TODO
-                .avatar_extension = .none,
-            },
-        },
+pub fn getPresence(self: Self) Presence {
+    return Presence{
+        .username = self.username,
+        .user_id = self.stats.user_id,
+        .timezone = self.time_zone,
+        .rank = self.stats.rank, //TODO
+        .permissions = self.permissions,
+        .longitude = 0, //TODO
+        .latitude = 0, //TODO
+        .country = 0, //TODO
+        .city = .{ .str = &.{} }, //TODO
+        .avatar_extension = .none,
     };
 }
 

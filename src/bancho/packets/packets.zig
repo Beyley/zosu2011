@@ -29,7 +29,8 @@ pub fn Packet(comptime packet_id: anytype, comptime DataType: type) type {
             //Serialize the packet data too
             try self.data.serialize(writer);
 
-            std.debug.print("sending packet {s} with data {}\n", .{ @tagName(packet_id), self.data });
+            std.debug.print("sending packet {s}\n", .{@tagName(packet_id)});
+            // std.debug.print("sending packet {s} with data {}\n", .{ @tagName(packet_id), self.data });
         }
 
         /// Deserializes a packet from the stream

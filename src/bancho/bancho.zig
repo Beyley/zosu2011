@@ -15,6 +15,8 @@ pub const RcClient = memutils.Rc(Client);
 pub const Byte = u8;
 ///A serialized ushort
 pub const UShort = u16;
+///A serialized short
+pub const Short = i16;
 ///A serialized int
 pub const Int = i32;
 ///A serialized long
@@ -63,6 +65,35 @@ pub fn ArrayString(comptime length: comptime_int) type {
         }
     };
 }
+pub const IntListIterator = struct {
+    const Self = @This();
+
+    reader: Client.Reader,
+    size: ?Short,
+    read: Short,
+
+    pub fn create(reader: Client.Reader) Self {
+        return .{
+            .reader = reader,
+            .read = 0,
+            .size = null,
+        };
+    }
+
+    pub fn next(self: *IntListIterator) !?Int {
+        if (self.size == null) {
+            self.size = try self.reader.readIntLittle(Short);
+        }
+
+        if (self.size.? == self.read) {
+            return null;
+        }
+
+        self.read += 1;
+
+        return try self.reader.readIntLittle(Int);
+    }
+};
 
 //Latest protocol version referenced in the 2011 client
 pub const ProtocolVersion = 7;
@@ -95,6 +126,7 @@ pub const AvailableChannels = struct {
     taiko: bool = false,
     ctb: bool = false,
     ziglang: bool = false,
+    lobby: bool = false,
 };
 
 pub const Mods = packed struct(Int) {
@@ -183,6 +215,7 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
                 },
             },
         },
+        .in_lobby = false,
     }, allocator) catch unreachable;
     client_rc.deinit_fn = handleClientDisconnect;
     var client: *Client = client_rc.data;
@@ -269,7 +302,7 @@ fn handleUserHandshake(client_sock: network.Socket, server_socket: network.Socke
 
     //Send the user a presence packet, giving all the nessesary info about themselves,
     //With this the client is happy to report that it is no longer "recieving data"
-    var user_presence_packet = client.getPresencePacket();
+    var user_presence_packet = Packets.Server.UserPresence.create(client.getPresence(), client_rc.borrow());
 
     try Main.thread_pool.spawn(sendPackets, .{
         client_rc.borrow(),
@@ -358,6 +391,8 @@ fn handleClientData(client_rc: RcClient) void {
     while (client.socket.peek(&buf) catch unreachable != 0 or client.read_from_temp_buf < client.temp_read_buf_slice.len) {
         const reader = client.reader();
 
+        client.last_heard_from = std.time.timestamp();
+
         const packet_id: Packets.Client.PacketId = @enumFromInt(reader.readIntLittle(u16) catch unreachable);
         const compression = reader.readIntLittle(u8) catch unreachable;
         _ = compression;
@@ -396,7 +431,7 @@ fn handleClientData(client_rc: RcClient) void {
                     //TODO: filter by friends if update_mode == .friends
 
                     Main.thread_pool.spawn(sendPackets, .{ client_rc.borrow(), .{
-                        updated_client.getPresencePacket(),
+                        Packets.Server.UserPresence.create(updated_client.getPresence(), next.*.borrow()),
                         Packets.Server.HandleOsuUpdate.create(updated_client.stats, next.*.borrow()),
                     }, null, .{} }) catch unreachable;
                 }
@@ -562,11 +597,127 @@ fn handleClientData(client_rc: RcClient) void {
                     }) catch unreachable;
                 }
             },
-            else => {
-                var left_to_read: usize = @intCast(payload_size);
-                while (left_to_read > 0) {
-                    left_to_read -= reader.read(buf[0..@min(payload_size, buf.len)]) catch unreachable;
+            .user_stats_request => {
+                var users_iter = IntListIterator.create(reader);
+
+                Main.users.mutex.lock();
+                defer Main.users.mutex.unlock();
+
+                while (users_iter.next() catch unreachable) |user| {
+                    if (Main.users.hash_map.get(user)) |client_to_send| {
+                        Main.thread_pool.spawn(sendPackets, .{
+                            client_rc.borrow(),
+                            .{Packets.Server.HandleOsuUpdate.create(client_to_send.data.stats, client_to_send.borrow())},
+                            null,
+                            .{},
+                        }) catch unreachable;
+                    }
                 }
+            },
+            .request_status_update => {
+                //TODO: update stats from some magic database idk
+
+                Main.thread_pool.spawn(
+                    sendPackets,
+                    .{
+                        client_rc.borrow(),
+                        .{Packets.Server.HandleOsuUpdate.create(client.stats, null)},
+                        null,
+                        .{},
+                    },
+                ) catch unreachable;
+            },
+            .lobby_join => {
+                client.in_lobby = true;
+
+                Main.users.mutex.lock();
+                defer Main.users.mutex.unlock();
+
+                var iter = Main.users.hash_map.valueIterator();
+
+                std.debug.print("user {s} is joining the lobby\n", .{client.username.slice()});
+
+                while (iter.next()) |next| {
+                    var target_rc: RcClient = next.*;
+                    var target: *Client = target_rc.data;
+
+                    if (target.in_lobby) {
+                        if (target.stats.user_id != client.stats.user_id) {
+                            std.debug.print("notifying {s} that {s} has joined the lobby\n", .{ target.username.slice(), client.username.slice() });
+                            Main.thread_pool.spawn(
+                                sendPackets,
+                                .{
+                                    target_rc.borrow(),
+                                    .{
+                                        Packets.Server.UserPresence.create(client.getPresence(), client_rc.borrow()),
+                                        Packets.Server.HandleOsuUpdate.create(client.stats, client_rc.borrow()),
+                                        Packets.Server.LobbyJoin.create(client_rc.borrow()),
+                                    },
+                                    null,
+                                    .{},
+                                },
+                            ) catch unreachable;
+                        }
+
+                        std.debug.print("notifying {s} that {s} is in the lobby\n", .{ client.username.slice(), target.username.slice() });
+                        Main.thread_pool.spawn(
+                            sendPackets,
+                            .{
+                                client_rc.borrow(),
+                                .{
+                                    Packets.Server.UserPresence.create(target.getPresence(), target_rc.borrow()),
+                                    Packets.Server.HandleOsuUpdate.create(target.stats, target_rc.borrow()),
+                                    Packets.Server.LobbyJoin.create(target_rc.borrow()),
+                                },
+                                null,
+                                .{},
+                            },
+                        ) catch unreachable;
+                    }
+                }
+            },
+            .lobby_part => {
+                client.in_lobby = false;
+
+                Main.users.mutex.lock();
+                defer Main.users.mutex.unlock();
+
+                var iter = Main.users.hash_map.valueIterator();
+
+                std.debug.print("user {s} is parting from the lobby\n", .{client.username.slice()});
+
+                while (iter.next()) |next| {
+                    var target_rc: RcClient = next.*;
+
+                    if (target_rc.data.in_lobby) {
+                        Main.thread_pool.spawn(
+                            sendPackets,
+                            .{
+                                target_rc.borrow(),
+                                .{Packets.Server.LobbyPart.create_from_client(client_rc.borrow())},
+                                null,
+                                .{},
+                            },
+                        ) catch unreachable;
+                    }
+                }
+            },
+            .error_report => {
+                const packet = Packets.Client.ErrorReport.deserialize(reader) catch unreachable;
+
+                std.debug.print("GOT ERROR REPORT {s}\n", .{packet.data.error_string.slice()});
+                @panic("ERR");
+            },
+            //Ignored.
+            .pong => {},
+            else => |id| {
+                std.debug.print("UNHANDLED PACKET {s}\n", .{@tagName(id)});
+                @panic("TPUNYHSTYSHYNTEHYNEOTSH");
+
+                // var left_to_read: usize = @intCast(payload_size);
+                // while (left_to_read > 0) {
+                //     left_to_read -= reader.read(buf[0..@min(payload_size, buf.len)]) catch unreachable;
+                // }
             },
         }
 
@@ -583,6 +734,30 @@ fn handleClientDisconnect(client: *const Client, allocator: std.mem.Allocator) v
     //Lock the user hash map mutex
     Main.users.mutex.lock();
     defer Main.users.mutex.unlock();
+
+    if (client.in_lobby) {
+        var iter = Main.users.hash_map.valueIterator();
+
+        while (iter.next()) |next| {
+            var target_rc: RcClient = next.*;
+            var target: *Client = target_rc.data;
+
+            //If this user is not in the lobby, continue
+            if (!target.in_lobby) {
+                continue;
+            }
+
+            Main.thread_pool.spawn(
+                sendPackets,
+                .{
+                    target_rc.borrow(),
+                    .{Packets.Server.LobbyPart.create_from_user_id(client.stats.user_id)},
+                    null,
+                    .{},
+                },
+            ) catch unreachable;
+        }
+    }
 
     std.debug.print("closing user socket\n", .{});
 
